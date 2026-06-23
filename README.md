@@ -90,34 +90,27 @@ CPU nhận:  C[m,n] = rslt[m,n] × out_scale               (→ F32)
 | FFN intermediate size | 4864 |
 | Vocab size | 151936 |
 
-### Phân bổ tensor theo layer
+### Phân bổ tensor theo layer (runtime type sau khi llama.cpp load)
 
-| Tensor | Shape | Type | Là MUL_MAT | Chia hết 32 | Size (MB) | Chạy trên |
-|--------|-------|------|-----------|------------|-----------|-----------|
-| token_embd.weight *(shape lẻ)* | [151936×896] | Q8_0 | Có | Không | 137.94 | CPU |
-| blk.N.attn_norm.weight ×24 | [896] | F32 | Không | Có | <0.01 | CPU |
-| blk.N.attn_q.weight ×24 | [896×896] | Q4_K | Có | Có | 0.46 | CPU ⚠️ |
-| blk.N.attn_q.bias ×24 | [896] | F32 | Không | Có | <0.01 | CPU |
-| blk.N.attn_k.weight ×24 | [128×896] | Q4_K | Có | Có | 0.07 | CPU ⚠️ |
-| blk.N.attn_k.bias ×24 | [128] | F32 | Không | Có | <0.01 | CPU |
-| blk.N.attn_v.weight ×24 | [128×896] | Q4_K | Có | Có | 0.07 | CPU ⚠️ |
-| blk.N.attn_v.bias ×24 | [128] | F32 | Không | Có | <0.01 | CPU |
-| blk.N.attn_output.weight ×24 | [896×896] | Q4_K | Có | Có | 0.46 | CPU ⚠️ |
-| blk.N.ffn_norm.weight ×24 | [896] | F32 | Không | Có | <0.01 | CPU |
-| blk.N.ffn_gate.weight ×24 | [4864×896] | Q4_K | Có | Có | 2.34 | CPU |
-| blk.N.ffn_up.weight ×24 | [4864×896] | Q4_K | Có | Có | 2.34 | CPU |
-| blk.N.ffn_down.weight ×24 | [896×4864] | Q4_K | Có | Có | 2.34 | CPU |
-| output_norm.weight | [896] | F32 | Không | Có | <0.01 | CPU |
-| output.weight *(shape lẻ)* | [151936×896] | Q4_K | Có | Không | 80.54 | CPU |
+| Tensor | Shape | Type (file) | Type (runtime) | Là MUL_MAT | Chia hết 32 | Size (MB) | Chạy trên |
+|--------|-------|------------|----------------|-----------|------------|-----------|-----------|
+| token_embd.weight *(shape lẻ)* | [151936×896] | Q8_0 | Q8_0 | Có | Không | 137.94 | CPU |
+| blk.N.attn_norm.weight ×24 | [896] | F32 | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_q.weight ×24 | [896×896] | Q4_K | **Q5_0** | Có | Có | 0.53 | **FPGA** |
+| blk.N.attn_q.bias ×24 | [896] | F32 | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_k.weight ×24 | [128×896] | Q4_K | **Q5_0** | Có | Có | 0.08 | **FPGA** |
+| blk.N.attn_k.bias ×24 | [128] | F32 | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_v.weight ×24 | [128×896] | Q4_K | **Q5_0** | Có | Có | 0.08 | **FPGA** |
+| blk.N.attn_v.bias ×24 | [128] | F32 | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_output.weight ×24 | [896×896] | Q4_K | **Q5_0** | Có | Có | 0.53 | **FPGA** |
+| blk.N.ffn_norm.weight ×24 | [896] | F32 | F32 | Không | Có | <0.01 | CPU |
+| blk.N.ffn_gate.weight ×24 | [4864×896] | Q4_K | Q4_K | Có | Có | 2.34 | **FPGA** |
+| blk.N.ffn_up.weight ×24 | [4864×896] | Q4_K | Q4_K | Có | Có | 2.34 | **FPGA** |
+| blk.N.ffn_down.weight ×24 | [896×4864] | Q4_K | Q4_K | Có | Có | 2.34 | **FPGA** |
+| output_norm.weight | [896] | F32 | F32 | Không | Có | <0.01 | CPU |
+| output.weight *(shape lẻ)* | [151936×896] | Q4_K | Q4_K | Có | Không | 80.54 | CPU |
 
-> **Ghi chú về điều kiện FPGA:** `token_embd.weight` và `output.weight` có shape lẻ (151936 không chia hết cho 32) nên không pass `block_aligned` → chạy CPU. Driver hỗ trợ `Q4_K` qua `cache_q4_K()` nên tất cả attention weight và FFN weight đều pass đủ điều kiện → **chạy FPGA**.
-
-| | Q5_0 | Q4_K_M |
-|-|------|---------|
-| Attention type | Q5_0 | Q4_K |
-| Attention → FPGA | ✅ Có | ⚠️ Cần update driver |
-| output.weight size | 89.26 MB | ~80.54 MB |
-| Tổng size ước tính | ~360 MB | ~320 MB |
+> **Ghi chú:** llama.cpp tự requantize một số tensor từ Q4_K → Q5_0 tại runtime (xác nhận qua debugger: `src0 type=GGML_TYPE_Q5_0`). `token_embd.weight` và `output.weight` có shape lẻ (151936 không chia hết 32) → CPU. FFN weights giữ nguyên Q4_K và được offload FPGA qua `cache_q4_K()`.
 
 ---
 
