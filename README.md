@@ -85,7 +85,7 @@ CPU nhận:  C[m,n] = rslt[m,n] × out_scale               (→ F32)
 
 | Thông số | Giá trị |
 |----------|---------|
-| Model | Qwen2.5-0.5B-Instruct-Q5_0 |
+| Model | Qwen2.5-0.5B-Instruct-Q4_K_M |
 | Số transformer layer | 24 |
 | Hidden size | 896 |
 | FFN intermediate size | 4864 |
