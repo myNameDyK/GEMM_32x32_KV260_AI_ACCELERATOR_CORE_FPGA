@@ -1,6 +1,6 @@
 # FPGA GEMM Integration for llama.cpp (KV260)
 
-Ý tưởng: Tích hợp FPGA GEMM accelerator (32×32 INT8) vào llama.cpp chạy trên board AMD KV260, nhằm tăng tốc phép nhân ma trận (GEMM) bằng phần cứng FPGA thay vì CPU.
+Ý tưởng: Tích hợp FPGA GEMM accelerator (32×32 INT8) vào llama.cpp chạy trên board Kria KV260, nhằm tăng tốc phép nhân ma trận (GEMM) bằng phần cứng FPGA thay vì CPU.
 
 ---
 
