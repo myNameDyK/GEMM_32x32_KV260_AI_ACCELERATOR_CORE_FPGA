@@ -1,585 +1,240 @@
-# GEMM 32x32 INT8 Accelerator on KV260
+# FPGA GEMM Integration for llama.cpp (KV260)
 
-> A bare-metal FPGA/SoC project implementing a **32x32 INT8 GEMM accelerator** on the **Xilinx KV260 / K26** platform using **Vivado + Vitis 2022.2**, AXI DMA, AXI-Lite control, and AXI-Stream data movement.
-
----
-
-## 1. Project Status
-
-This project has been successfully tested on hardware.
-
-```text
-DMA0 feature done, status=0x00001002
-DMA1 weight done, status=0x00001002
-DMA2 result done, status=0x00001002
-COMPARE PASS
-```
-
-Current verified configuration:
-
-| Item | Value |
-|---|---:|
-| Matrix size | 32 x 32 |
-| Data type | INT8 |
-| Input A size | 1024 bytes |
-| Input B size | 1024 bytes |
-| Output C size | 1024 bytes |
-| AXI Stream width | 256 bits |
-| AXI Stream beat size | 32 bytes |
-| Board | KV260 / K26 |
-| Tool version | Vivado / Vitis 2022.2 |
+Dự án tích hợp FPGA GEMM accelerator (32×32 INT8) vào llama.cpp chạy trên board AMD KV260, nhằm tăng tốc phép nhân ma trận (GEMM) bằng phần cứng FPGA thay vì CPU.
 
 ---
 
-## 2. Project Overview
+## Mục tiêu
 
-The accelerator computes:
+Thay thế phép nhân ma trận (GEMM) trong llama.cpp bằng FPGA hardware accelerator. Khi chạy inference mô hình ngôn ngữ (LLM), phần lớn thời gian tính toán nằm ở các phép GEMM. Dự án này hook vào đúng điểm đó trong llama.cpp, kiểm tra điều kiện phù hợp (kiểu quantization, kích thước ma trận), và chuyển công việc sang FPGA qua DMA — trong khi CPU vẫn xử lý các phần còn lại.
 
-```text
-C = A x B
-```
-
-Where:
-
-```text
-A: 32 x 32 INT8
-B: 32 x 32 INT8
-C: 32 x 32 INT8
-```
-
-The FPGA design receives input matrices through AXI DMA, performs GEMM in the custom RTL core, and writes the result back to DDR through another AXI DMA.
-
-The CPU configures the accelerator through AXI-Lite registers.
+Hỗ trợ các kiểu quantization: **Q5_0**, **Q8_0**, **Q4_K**.
 
 ---
 
-## 3. High-Level Architecture
+## Luồng hoạt động tổng quan
 
-```mermaid
-flowchart LR
-    DDR_A[DDR: Matrix A] --> DMA0[axi_dma_0<br/>MM2S Feature DMA]
-    DDR_B[DDR: Matrix B] --> DMA1[axi_dma_1<br/>MM2S Weight DMA]
-
-    DMA0 -->|AXI Stream 256-bit| GEMM[GEMM_top<br/>32x32 INT8 GEMM Core]
-    DMA1 -->|AXI Stream 256-bit| GEMM
-
-    GEMM -->|AXI Stream 256-bit| DMA2[axi_dma_2<br/>S2MM Result DMA]
-    DMA2 --> DDR_C[DDR: Matrix C]
-
-    CPU[Cortex-A53 Bare-metal App] -->|AXI-Lite| CTRL[AXI Interconnect]
-    CTRL --> DMA0
-    CTRL --> DMA1
-    CTRL --> DMA2
-    CTRL --> GEMM
+```
+llama.cpp (ggml-cpu.c)
+└── ggml_compute_forward_mul_mat()
+    │   src0 = weight (quantized), src1 = activation (F32), dst = output (F32)
+    │
+    └── [FPGA HOOK — #ifdef GGML_USE_FPGA, chỉ thread ith==0]
+        │
+        ├── Điều kiện bắt buộc (tất cả phải đúng):
+        │   ├── fpga_gemm_is_ready() == true
+        │   ├── src0->type ∈ {Q5_0, Q8_0, Q4_K}
+        │   ├── src1->type == F32
+        │   ├── không batch: ne02==1, ne03==1, ne12==1, ne13==1
+        │   ├── K khớp: ne10 == ne00
+        │   ├── kích thước hợp lệ: ne01 < 65537, ne00 < 65537, ne11 > 0
+        │   └── block aligned:
+        │       ├── Q4_K → (K×N) % 256 == 0
+        │       └── Q5_0 / Q8_0 → (K×N) % 32 == 0
+        │
+        ├── Nếu đủ điều kiện → fpga_gemm_run(weight, quant, activation, output, M, K, N, shift=0)
+        │   │
+        │   ├── A. Quantize activation: scale_B = max|B|/127 ; feat_q = clamp(round(B/scale_B))
+        │   │       → ghi vào DDR_FEAT (M × K_pad bytes, zero-pad K → K_pad = ceil32(K))
+        │   │
+        │   ├── B. Cache weight (một lần duy nhất theo con trỏ src0->data):
+        │   │       dequant Q5_0/Q8_0/Q4_K → float → quantize → int8
+        │   │       zero-pad K→K_pad, N→N_pad → ghi vào weight pool trong DDR_WGHT
+        │   │       lưu WeightEntry{phys_addr, scale_W, size, K_pad, N_pad}
+        │   │
+        │   ├── C. Tính shift = floor(log2(K_pad × 127)), clamp [0, 24]
+        │   │
+        │   ├── D. Ghi AXI-Lite config:
+        │   │       REG_SHIFT    = shift
+        │   │       REG_F_LENGTH = M
+        │   │       REG_F_WIDTH  = K_pad / 32
+        │   │       REG_W_WIDTH  = N_pad / 32
+        │   │
+        │   ├── E. DMA sequence:
+        │   │       dma_recv_start(DDR_RSLT, M×N_pad)   ← bắt đầu nhận trước
+        │   │       dma_send(DDR_FEAT, M×K_pad)          ← gửi activation
+        │   │       dma_send(DDR_WGHT+offset, size)      ← gửi weight
+        │   │       dma_recv_wait()                      ← đợi kết quả
+        │   │
+        │   └── F. Dequant output: C[m,n] = ddr_rslt[m×N_pad+n] × scale_B × scale_W × 2^shift
+        │
+        ├── ggml_barrier() — đồng bộ các thread
+        ├── return  ← bỏ qua toàn bộ CPU path
+        │
+        └── Ngược lại → CPU path bình thường (vec_dot, multi-thread, v.v.)
 ```
 
----
+### Math pipeline (quantization)
 
-## 4. Hardware Data Path
+```
+scale_B = max|activation| / 127
+scale_W = max|weight_f32| / 127       (tính lúc cache, lưu trong WeightEntry)
+out_scale = scale_B × scale_W × 2^shift
 
-| Block | Direction | Function |
-|---|---|---|
-| `axi_dma_0` | DDR -> GEMM | Sends feature matrix A to `feature_axis` |
-| `axi_dma_1` | DDR -> GEMM | Sends weight matrix B to `weight_axis` |
-| `axi_dma_2` | GEMM -> DDR | Receives output matrix C from `result_axis` |
-| `GEMM_top` | Custom IP | Contains AXI-Lite control, AXI-Stream interfaces, and GEMM compute core |
+FPGA tính: acc[m,n] = Σ_k feat_q[m,k] × wght_q[k,n]   (INT8 × INT8 → ACC)
+           rslt[m,n] = clamp(acc >> shift, -128, 127)    (INT8 output)
 
-DMA mapping:
-
-```text
-DMA0 MM2S  -> GEMM_top.feature_axis
-DMA1 MM2S  -> GEMM_top.weight_axis
-GEMM_top.result_axis -> DMA2 S2MM
+CPU nhận:  C[m,n] = rslt[m,n] × out_scale               (→ F32)
 ```
 
 ---
 
-## 5. Address Map
+## Model đang sử dụng
 
-| IP Block | Purpose | Base Address | Vitis Macro |
-|---|---|---:|---|
-| `axi_dma_0` | Feature input DMA | `0xA0000000` | `XPAR_AXI_DMA_0_BASEADDR` |
-| `axi_dma_1` | Weight input DMA | `0xA0010000` | `XPAR_AXI_DMA_1_BASEADDR` |
-| `axi_dma_2` | Result output DMA | `0xA0020000` | `XPAR_AXI_DMA_2_BASEADDR` |
-| `GEMM_top_0` | GEMM control | `0xA0030000` | `XPAR_GEMM_TOP_0_BASEADDR` |
+**Qwen2.5-0.5B-Instruct (Q5_0)**
 
-Recommended `Defines.h` aliases:
+| Thông số | Giá trị |
+|----------|---------|
+| Model | Qwen2.5-0.5B-Instruct-Q5_0 |
+| Số transformer layer | 24 |
+| Hidden size | 896 |
+| FFN intermediate size | 4864 |
+| Vocab size | 151936 |
 
-```c
-#define MM_ADDR             XPAR_GEMM_TOP_0_BASEADDR
+### Phân bổ tensor theo layer
 
-#define FEATURE_DMA_ADDR    XPAR_AXI_DMA_0_BASEADDR
-#define WEIGHT_DMA_ADDR     XPAR_AXI_DMA_1_BASEADDR
-#define RESULT_DMA_ADDR     XPAR_AXI_DMA_2_BASEADDR
+| Tensor | Shape | Type | Là MUL_MAT | Chia hết 32 | Size (MB) | Chạy trên |
+|--------|-------|------|-----------|------------|-----------|-----------|
+| token_embd.weight *(shape lẻ)* | [151936×896] | Q8_0 | Có | Có | 137.94 | CPU |
+| blk.N.attn_norm.weight ×24 | [896] | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_q.weight ×24 | [896×896] | Q5_0 | Có | Có | 0.53 | **FPGA** |
+| blk.N.attn_q.bias ×24 | [896] | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_k.weight ×24 | [128×896] | Q5_0 | Có | Có | 0.08 | **FPGA** |
+| blk.N.attn_k.bias ×24 | [128] | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_v.weight ×24 | [128×896] | Q5_0 | Có | Có | 0.08 | **FPGA** |
+| blk.N.attn_v.bias ×24 | [128] | F32 | Không | Có | <0.01 | CPU |
+| blk.N.attn_output.weight ×24 | [896×896] | Q5_0 | Có | Có | 0.53 | **FPGA** |
+| blk.N.ffn_norm.weight ×24 | [896] | F32 | Không | Có | <0.01 | CPU |
+| blk.N.ffn_gate.weight ×24 | [4864×896] | Q4_K | Có | Có | 2.34 | CPU |
+| blk.N.ffn_up.weight ×24 | [4864×896] | Q4_K | Có | Có | 2.34 | CPU |
+| blk.N.ffn_down.weight ×24 | [896×4864] | Q4_K | Có | Có | 2.34 | CPU |
+| output_norm.weight | [896] | F32 | Không | Có | <0.01 | CPU |
+| output.weight *(shape lẻ)* | [151936×896] | Q5_0 | Có | Có | 89.26 | CPU |
 
-#define A_SIZE 32
-```
-
-More details are documented in:
-
-```text
-vivado/notes/address_map.md
-```
-
----
-
-## 6. GEMM Control Registers
-
-The custom GEMM IP is configured through AXI-Lite.
-
-| Register | Offset | Meaning | Current Test Value |
-|---|---:|---|---:|
-| `SHIFT` | `0x00` | Right shift after accumulation | `0` |
-| `F_length` | `0x04` | Number of feature rows | `32` |
-| `F_width_block_num` | `0x08` | Number of feature width blocks | `1` |
-| `W_width_block_num` | `0x0C` | Number of weight/output width blocks | `1` |
-
-For the verified 32x32 test:
-
-```text
-F_length          = 32
-F_width_block_num = 1
-W_width_block_num = 1
-SHIFT             = 0
-```
+> **Ghi chú về điều kiện FPGA:** `token_embd.weight` và `output.weight` có shape lẻ (151936 không chia hết cho 32) nên không pass `block_aligned` → chạy CPU. Các layer FFN dùng Q4_K: driver hỗ trợ dequant Q4_K, nhưng điều kiện `block_aligned` yêu cầu `(K×N) % 256 == 0` (QK_K=256) — cần kiểm tra thực tế từng shape. Các attention weight Q5_0 (q, k, v, output) với shape [896×896] và [128×896] đều pass đủ điều kiện → chạy FPGA.
 
 ---
 
-## 7. Repository Structure
+## Các file đã thêm / sửa
 
-Recommended repo layout:
+### Files mới tạo
 
-```text
-GEMM_32x32_KV260/
-│
-├── README.md
-├── .gitignore
-│
-├── docs/
-│   └── GEMM_32x32_DEBUG_README.md
-│
-├── rtl/
-│   ├── GEMM_top.v
-│   ├── GEMM_core.v
-│   ├── In_buffer.v
-│   ├── Buffer_feeder.v
-│   ├── Out_buffer.v
-│   ├── Gemm_compute_core.v
-│   ├── PE_array.v
-│   ├── PE_row.v
-│   ├── PE.v
-│   ├── Signed_adder.v
-│   └── Right_shifter.v
-│
-├── axi_ip/
-│   ├── Feature_stream_slave.v
-│   ├── Feature_stream_slave_feature_axis.v
-│   ├── Weight_stream_slave.v
-│   ├── Weight_stream_slave_weight_axis.v
-│   ├── Result_stream_master.v
-│   ├── Result_stream_master_result_axis.v
-│   ├── Control_register_file.v
-│   └── Control_register_file_S0_AXI4Lite.v
-│
-├── tb/
-│   └── GEMM_core_tb_renamed.sv
-│
-├── vivado/
-│   ├── bd/
-│   │   └── GEMM_BD.tcl
-│   ├── scripts/
-│   │   ├── create_project.tcl
-│   │   ├── package_ip.tcl
-│   │   └── export_xsa.tcl
-│   └── notes/
-│       └── address_map.md
-│
-└── vitis/
-    └── gemm_test_app/
-        └── src/
-            ├── main.cpp
-            ├── Defines.h
-            ├── Matrix.cpp
-            └── Matrix.h
-```
+**`ggml/src/ggml-cpu/FPGA_GEMM/FPGA_GEMM.h`**
+Header định nghĩa API công khai cho FPGA driver, bao gồm:
+- `fpga_gemm_init()` — khởi tạo driver, map địa chỉ AXI-Lite và DMA buffer
+- `fpga_gemm_run()` — thực hiện toàn bộ pipeline GEMM trên FPGA
+- `fpga_gemm_is_ready()` — kiểm tra trạng thái sẵn sàng
+- Struct `WeightEntry` cho weight cache, enum `FpgaQuantType`, các hằng số địa chỉ DDR và AXI-Lite
+
+**`ggml/src/ggml-cpu/FPGA_GEMM/FPGA_GEMM.cpp`**
+Driver chính, gồm các thành phần:
+
+- **`fpga_gemm_init()`** — mở `/dev/mem`, `mmap` 4 vùng AXI-Lite (`AXILITE_BASE`), 3 DMA controller (`DMA_FEAT/WGHT/RSLT`), và 3 vùng DDR vật lý (`DDR_FEAT/WGHT/RSLT`). Reset các DMA channel. Trên Windows dùng `mock_init()`.
+- **`fpga_gemm_run()`** — pipeline 6 bước: quantize activation → cache weight → tính shift → ghi AXI-Lite → DMA sequence → dequant output. Trên Windows build, sau lần chạy đầu tiên còn in thêm CPU reference GEMM để so sánh `max_diff` / `mean_diff`.
+- **Weight cache** (`g_weight_cache`) — `unordered_map<const void*, WeightEntry>` key theo con trỏ `src0->data`. Mỗi weight tensor chỉ dequant và ghi DDR một lần duy nhất trong suốt session.
+- **Weight pool allocator** (`alloc_weight`) — phân bổ tuyến tính trong `DDR_WGHT` (0x84000000, 512 MB), align 64 byte. Không có free/LRU — pool reset khi `fpga_gemm_cleanup()`.
+- **Dequant helpers** — `dequant_q5_0`, `dequant_q8_0`, `dequant_q4_K` convert block format của ggml sang float32 trước khi re-quantize INT8.
+
+**`ggml/src/ggml-cpu/FPGA_GEMM/fpga_win_mock.h`**
+Mock layer cho Windows/PC: giả lập `mmap` (dùng `malloc`), DMA send/recv (dùng `memcpy` + tính INT8 GEMM bằng CPU), và AXI-Lite register writes (log ra stdout). Khi build trên `_WIN32`, file này được include trực tiếp trong `FPGA_GEMM.cpp`, thay thế toàn bộ phần hardware. Đặc biệt: mock tính sẵn kết quả INT8 GEMM trong `dma_recv_start` để `fpga_gemm_run` có thể đọc về và so sánh với CPU float reference.
+
+**`cmake/aarch64-toolchain.cmake`**
+Toolchain cross-compile cho board KV260 (target: `aarch64-linux-gnu`).
+
+**`CMakeUserPresets.json`**
+Preset build `debug-fpga` với flag `DGGML_USE_FPGA=ON`, cấu hình sẵn cho cross-compile.
+
+**`tests/fpga_gemm_test.cpp`**
+Unit test kiểm tra độ chính xác FPGA GEMM so với CPU reference: chạy cùng một phép GEMM trên cả hai đường, so sánh `max_diff` và `mean_diff`.
+
+### Files sửa đổi
+
+**`ggml/src/ggml-cpu/ggml-cpu.c`**
+Thêm FPGA GEMM hook vào đầu hàm `ggml_compute_forward_mul_mat()` (trong block `#ifdef GGML_USE_FPGA`). Hook chỉ chạy trên thread `ith == 0` và kiểm tra đầy đủ: `fpga_gemm_is_ready()`, quant type hợp lệ, `src1->type == F32`, không batch (`ne02/ne03/ne12/ne13 == 1`), K khớp (`ne10 == ne00`), kích thước trong phạm vi (`< 65537`), và `block_aligned` (tùy quant type). Sau `fpga_gemm_run()` gọi `ggml_barrier()` để đồng bộ rồi `return` bỏ qua toàn bộ CPU path.
+
+**`ggml/src/CMakeLists.txt`** và **`ggml/src/ggml-cpu/CMakeLists.txt`**
+Thêm build target cho `FPGA_GEMM` và compile flag `GGML_USE_FPGA=ON/OFF`. Khi bật, `FPGA_GEMM.cpp` được thêm vào build.
 
 ---
 
-## 8. Important Files
+## Tổ chức bộ nhớ trong DDR
 
-| File | Purpose |
-|---|---|
-| `vivado/bd/GEMM_BD.tcl` | Recreates the Vivado Block Design |
-| `vivado/scripts/create_project.tcl` | Creates a clean Vivado project shell |
-| `vivado/scripts/package_ip.tcl` | Packages `GEMM_top` as a custom IP |
-| `vivado/scripts/export_xsa.tcl` | Builds/export hardware platform `.xsa` |
-| `vivado/notes/address_map.md` | Documents address map, DMA register usage, and debug notes |
-| `docs/GEMM_32x32_DEBUG_README.md` | Detailed debug history and known issues |
-| `vitis/gemm_test_app/src/main.cpp` | Bare-metal test application |
-| `vitis/gemm_test_app/src/Defines.h` | Hardware base address and register macros |
+<img width="354" height="620" alt="screenshot_1782083046" src="https://github.com/user-attachments/assets/d14d0e6e-0218-4884-ad6a-8816a06ff3f0" />
+
+```
+
+AXI-Lite / DMA Register Map:
+  DMA_FEAT  0xA0000000  — MM2S gửi feature lên FPGA
+  DMA_WGHT  0xA0010000  — MM2S gửi weight lên FPGA
+  DMA_RSLT  0xA0020000  — S2MM nhận kết quả từ FPGA
+  AXILITE   0xA0030000  — Control registers:
+              +0x00  REG_SHIFT    = shift (số bit dịch phải output)
+              +0x04  REG_F_LENGTH = M     (số hàng activation)
+              +0x08  REG_F_WIDTH  = K_pad/32
+              +0x0C  REG_W_WIDTH  = N_pad/32
+```
+
+Weight pool dùng allocator tuyến tính (`alloc_weight`): mỗi tensor được ghi một lần, align 64 byte, không bao giờ giải phóng trong session. `g_weight_cache` (hash map theo con trỏ `src0->data`) giúp bỏ qua bước dequant từ lần thứ hai trở đi — quan trọng với auto-regressive generation (mỗi token dùng lại cùng weight).
 
 ---
 
-## 9. Vivado Rebuild Flow
+## Kết quả debug (Qwen2.5-0.5B, Q5_0)
 
-### 9.1 Create Project
-
-Open Vivado Tcl Console and run:
-
-```tcl
-cd <repo_root>/vivado/scripts
-source create_project.tcl
-```
-
-### 9.2 Package Custom IP
-
-```tcl
-source package_ip.tcl
-```
-
-### 9.3 Recreate Block Design
-
-```tcl
-source <repo_root>/vivado/bd/GEMM_BD.tcl
-```
-
-### 9.4 Validate Block Design
-
-```tcl
-validate_bd_design
-save_bd_design
-```
-
-### 9.5 Generate Bitstream and Export XSA
-
-```tcl
-source <repo_root>/vivado/scripts/export_xsa.tcl
-```
-
-Expected output:
-
-```text
-GEMM_BD_wrapper.xsa
-GEMM_BD_wrapper.bit
-```
+| Thông số | Giá trị |
+|----------|---------|
+| Ma trận test | M=2, K=896, N=896 |
+| Kiểu quant | Q5_0 |
+| DMA time | ~19ms |
+| scale_B (activation) | 0.01327 |
+| scale_W (weight) | 0.00966 |
+| out_scale | 0.01641 |
+| max_diff (FPGA vs CPU) | 0.0627 |
+| mean_diff | 0.0129 |
 
 ---
 
-## 10. Vitis Run Flow
+## Breakpoints debug
 
-The project was tested using a bare-metal application on:
+> 📄 **Tài liệu debug chi tiết (giá trị biến, screenshot debugger):**
+> [llama.cpp debug session — Google Docs](https://docs.google.com/document/d/1uPPehYYf_vkRd8qAYk1fcu2wlW_GFQ006bVToX3j-AQ/edit?usp=sharing)
 
-```text
-psu_cortexa53_0
-standalone_domain
-psu_uart_1
-```
-
-### 10.1 Create / Update Platform
-
-In Vitis:
-
-```text
-New Platform Project
-Select exported GEMM_BD_wrapper.xsa
-Build Platform
-```
-
-### 10.2 Build App
-
-Use the app source under:
-
-```text
-vitis/gemm_test_app/src/
-```
-
-Build the application to generate:
-
-```text
-gemm_test_app.elf
-```
+| # | Vị trí | Mục đích |
+|---|--------|---------|
+| BP1 | `ggml_compute_forward_mul_mat` dòng 1281 | Xem shape tensor đầu vào |
+| BP2 | dòng 1314 | Xác nhận điều kiện FPGA & block alignment |
+| BP3 | dòng 1323 | Xem tham số truyền vào `fpga_gemm_run()` |
+| BP4 | `fpga_gemm_run` dòng 415 | Kiểm tra init & tham số đầu vào |
+| BP5 | dòng 434 | Kết quả quantize activation |
+| BP6 | dòng 473 | Weight cache & sanity check padding |
+| BP7 | dòng 501 | Sau DMA: kiểm tra out_scale, dequant INT8 → F32, so sánh FPGA vs CPU reference |
 
 ---
 
-## 11. XSCT Manual Run Flow
+## File test
 
-Due to a Vitis GUI Run Configuration issue, the verified run used XSCT.
+`tests/fpga_gemm_test.cpp` kiểm tra độ chính xác của FPGA GEMM so với CPU reference float. Với mỗi test case, file này tạo weight ngẫu nhiên, encode sang định dạng quantized (Q5_0 / Q8_0 / Q4_K), chạy `fpga_gemm_run()`, rồi so sánh kết quả với CPU GEMM float qua `nRMSE`, `max_abs`, và tỉ lệ đúng dấu. Có 14 test case bao phủ các shape thực tế của model (896×896, 128×896, 4864×896...) và các trường hợp K/N không chia hết cho 32.
 
-Example:
-
-```tcl
-connect
-targets
-
-targets -set -filter {name =~ "*PSU*"}
-source {E:/VITIS_2022/gemm_top_caoky/export/gemm_top_caoky/hw/psu_init.tcl}
-psu_init
-psu_ps_pl_isolation_removal
-psu_ps_pl_reset_config
-
-fpga -f {E:/Everything_with_VIVADO/MM_final/MM_final.runs/impl_1/GEMM_BD_wrapper.bit}
-
-targets -set -filter {name =~ "Cortex-A53 #0"}
-rst -processor
-dow {E:/VITIS_2022/gemm_test_app/Debug/gemm_test_app.elf}
-con
+```bash
+# Build trên Windows (dùng MSVC, không cần board)
+cl /EHsc /I ggml\src\ggml-cpu\FPGA_GEMM ^
+   tests\fpga_gemm_test.cpp ^
+   ggml\src\ggml-cpu\FPGA_GEMM\FPGA_GEMM.cpp ^
+   /Fe:fpga_test.exe
+fpga_test.exe
 ```
 
-Expected UART output:
-
-```text
-===== GEMM 32x32 DMA TEST START =====
-DMA0 feature done, status=0x00001002
-DMA1 weight done, status=0x00001002
-DMA2 result done, status=0x00001002
-COMPARE PASS
-===== GEMM 32x32 DMA TEST END =====
-```
+Ngưỡng pass: `nRMSE < 0.30` với Q5_0/Q8_0, `nRMSE < 0.40` với Q4_K (do double-quantization), và tỉ lệ đúng dấu ≥ 80%.
 
 ---
 
-## 12. DMA Execution Order
+## Build
 
-The safe DMA order is:
-
-```text
-1. Write GEMM control registers.
-2. Flush cache for A, B, and C buffers.
-3. Start DMA2 S2MM first.
-4. Start DMA0 MM2S for matrix A.
-5. Start DMA1 MM2S for matrix B.
-6. Wait for DMA0, DMA1, and DMA2 done.
-7. Invalidate result buffer cache.
-8. Compare C_hw with C_sw.
+```bash
+# Cross-compile cho KV260
+cmake --preset debug-fpga \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-toolchain.cmake \
+      -DGGML_USE_FPGA=ON
+make -j$(nproc)
 ```
 
-Reason:
-
-```text
-The result DMA must be ready before GEMM starts producing output.
-```
-
----
-
-## 13. Known Issues and Fixes
-
-### 13.1 Vitis GUI Error
-
-Observed error:
-
-```text
-can't read "map": no such variable
-```
-
-This was caused by a broken Vitis Run Configuration / workspace metadata.
-
-Workaround:
-
-```text
-Use XSCT manual run flow instead of GUI Launch Hardware.
-```
-
----
-
-### 13.2 AXI-Lite Read/Write Hang
-
-Observed symptom:
-
-```text
-AXI-Lite bus test
-DMA0 base = 0xA0000000
-Read DMA0 DMASR...
-```
-
-The program hung while reading DMA status.
-
-Root cause:
-
-```text
-PL reset was not released correctly because proc_sys_reset/dcm_locked was not driven high.
-```
-
-Fix:
-
-```text
-Connect xlconstant = 1'b1 to rst_ps8_0_99M/dcm_locked.
-```
-
-After the fix, AXI-Lite worked:
-
-```text
-DMA0 DMASR = 0x00000001
-Write GEMM SHIFT done
-```
-
----
-
-### 13.3 DMA Done but Hardware Output All Zero
-
-Observed symptom:
-
-```text
-DMA0 feature done
-DMA1 weight done
-DMA2 result done
-C_hw all zero
-COMPARE FAIL
-```
-
-Workaround:
-
-```c
-volatile u32 delay;
-
-Xil_Out32(SHIFT_ADDR, 1);
-Xil_Out32(FL_ADDR, 31);
-Xil_Out32(FWBN_ADDR, 2);
-Xil_Out32(WWBN_ADDR, 2);
-
-for (delay = 0; delay < 100000; delay++);
-
-Xil_Out32(SHIFT_ADDR, 0);
-Xil_Out32(FL_ADDR, 32);
-Xil_Out32(FWBN_ADDR, 1);
-Xil_Out32(WWBN_ADDR, 1);
-
-for (delay = 0; delay < 100000; delay++);
-```
-
-After this workaround:
-
-```text
-COMPARE PASS
-```
-
-Suspected RTL reason:
-
-```text
-Some GEMM internal config registers may only latch when the input value changes.
-```
-
-Long-term RTL recommendation:
-
-```verilog
-always @(posedge clk or negedge rst_n) begin
-    if (~rst_n) begin
-        shift             <= 0;
-        F_length          <= 0;
-        F_width_block_num <= 0;
-        W_width_block_num <= 0;
-    end else begin
-        shift             <= shift_in;
-        F_length          <= F_length_in;
-        F_width_block_num <= F_width_block_num_in;
-        W_width_block_num <= W_width_block_num_in;
-    end
-end
-```
-
----
-
-## 14. Hardware Test Result
-
-Sample output from the verified run:
-
-```text
-C_hw sample 8x8:
-  34   31  -32    0  -33   34   31  -32 
-   2  -29   30   29  -32    2  -29   30 
-  30  -29    2  -32   29   30  -29    2 
- -32   31   34  -33    0  -32   31   34 
- -34   -4  -34   36   36  -34   -4  -34 
-  34   31  -32    0  -33   34   31  -32 
-   2  -29   30   29  -32    2  -29   30 
-  30  -29    2  -32   29   30  -29    2 
-
-COMPARE PASS
-```
-
----
-
-## 15. Notes for Future Developers
-
-Before modifying the RTL, always keep a known-good version of:
-
-```text
-main.cpp
-Defines.h
-GEMM_BD.tcl
-GEMM_BD_wrapper.bit
-GEMM_BD_wrapper.xsa
-```
-
-Recommended debug order:
-
-```text
-1. UART Hello World
-2. AXI-Lite read DMA0 status
-3. AXI-Lite write GEMM register
-4. DMA0 MM2S only
-5. DMA1 MM2S only
-6. DMA2 S2MM only
-7. Full GEMM
-8. Software vs hardware comparison
-```
-
-Do not debug full GEMM before AXI-Lite and DMA are proven working.
-
----
-
-## 16. What Should Not Be Pushed to GitHub
-
-Do not push generated Vivado/Vitis folders:
-
-```text
-.runs/
-.sim/
-.cache/
-.hw/
-.ip_user_files/
-.gen/
-.Xil/
-Debug/
-Release/
-.metadata/
-```
-
-Do not push heavy build artifacts directly unless needed:
-
-```text
-*.bit
-*.xsa
-*.hwh
-*.elf
-```
-
-Recommended:
-
-```text
-Source code in repo
-Bitstream/XSA/ELF in GitHub Release
-```
-
----
-
-## 17. Current Limitation
-
-This is currently a fixed 32x32 INT8 GEMM hardware test. It is not yet a fully dynamic matrix multiplication engine for arbitrary matrix sizes.
-
-Future work:
-
-```text
-- Clean RTL config register latch logic
-- Add more hardware test cases
-- Add identity matrix test
-- Add performance measurement
-- Add resource utilization table
-- Add timing report summary
-- Integrate into a larger Transformer / attention pipeline
-```
-
----
-
-## 18. Credits
-
-This project was developed as part of an FPGA-based GEMM / AI accelerator workflow using Verilog, Vivado Block Design, AXI DMA, AXI-Lite control, and bare-metal Vitis testing on KV260.
+> Nếu bạn cần bổ sung thêm tài liệu (địa chỉ AXI-Lite cụ thể, cấu trúc FPGA IP, kết quả benchmark đầy đủ...), hãy gắn thêm vào để README được cập nhật chính xác hơn.
