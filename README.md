@@ -158,7 +158,8 @@ Thêm build target cho `FPGA_GEMM` và compile flag `GGML_USE_FPGA=ON/OFF`. Khi 
 
 ## Tổ chức bộ nhớ trong DDR
 
-<img width="354" height="620" alt="screenshot_1782083046" src="https://github.com/user-attachments/assets/d14d0e6e-0218-4884-ad6a-8816a06ff3f0" />
+<img width="352" height="587" alt="image" src="https://github.com/user-attachments/assets/06e73cc2-40d6-4904-b857-e0ca49c9282b" />
+
 
 ```
 
