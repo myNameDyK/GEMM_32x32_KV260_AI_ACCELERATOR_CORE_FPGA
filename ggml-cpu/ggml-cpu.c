@@ -1284,53 +1284,70 @@ void ggml_compute_forward_mul_mat(
 // FPGA GEMM HOOK
 #ifdef GGML_USE_FPGA
     {
-        // Xác định quant type được hỗ trợ
-        FpgaQuantType fpga_quant;
-        bool          fpga_supported_type = false;
+        // Only run during the real compute phase. INIT/FINALIZE must keep ggml behavior unchanged.
+        if (!params->use_ref) {
+            FpgaQuantType fpga_quant;
+            int64_t       qk_required         = 0;
+            bool          fpga_supported_type = false;
 
-        if (src0->type == GGML_TYPE_Q5_0) {
-            fpga_quant          = FPGA_QUANT_Q5_0;
-            fpga_supported_type = true;
-        } else if (src0->type == GGML_TYPE_Q8_0) {
-            fpga_quant          = FPGA_QUANT_Q8_0;
-            fpga_supported_type = true;
-        } else if (src0->type == GGML_TYPE_Q4_K) {
-            fpga_quant          = FPGA_QUANT_Q4_K;
-            fpga_supported_type = true;
-        }
-
-        if (fpga_gemm_is_ready() && fpga_supported_type && src1->type == GGML_TYPE_F32  // activation luôn F32
-            && ne02 == 1 && ne03 == 1                                                   // không batch src0
-            && ne12 == 1 && ne13 == 1                                                   // không batch src1
-            && ne10 == ne00  // K phải khớp: src1.cols == src0.cols
-            && ne01 < 65537
-            && ne00 < 65537  
-            && ne11 > 0)     // M > 0
-        {
-            // Q4_K: K*N phải chia hết cho 256 (QK_K)
-            // Q8_0: K*N phải chia hết cho 32  (QK8_0)
-            // Q5_0: K*N phải chia hết cho 32  (QK5_0)
-            // — ggml đảm bảo điều này khi model load đúng quant
-            bool block_aligned = false;
-            if (fpga_quant == FPGA_QUANT_Q4_K) {
-                block_aligned = ((ne00 * ne01) % 256 == 0);
-            } else {
-                block_aligned = ((ne00 * ne01) % 32 == 0);
+            if (src0->type == GGML_TYPE_Q5_0) {
+                fpga_quant          = FPGA_QUANT_Q5_0;
+                qk_required         = 32;
+                fpga_supported_type = true;
+            } else if (src0->type == GGML_TYPE_Q8_0) {
+                fpga_quant          = FPGA_QUANT_Q8_0;
+                qk_required         = 32;
+                fpga_supported_type = true;
+            } else if (src0->type == GGML_TYPE_Q4_K) {
+                fpga_quant          = FPGA_QUANT_Q4_K;
+                qk_required         = 256;
+                fpga_supported_type = true;
             }
 
-            if (block_aligned) {
+            const int64_t M = ne11;  // activation rows / number of tokens
+            const int64_t K = ne00;  // inner dimension
+            const int64_t N = ne01;  // output columns / weight rows
+
+            const int64_t k_blocks = (K + 31) / 32;
+            const int64_t n_blocks = (N + 31) / 32;
+
+            // Current RTL limits from register widths and default buffer depths.
+            // row_count is 9 bits; k/n block counts are 5 bits; buffers are depth 2400 words.
+            const bool rtl_shape_ok = M >= 1 && M <= 511 && k_blocks >= 1 && k_blocks <= 31 && n_blocks >= 1 &&
+                                      n_blocks <= 31 && (M * k_blocks) <= 2400 && (k_blocks * 32 * n_blocks) <= 2400 &&
+                                      (M * n_blocks) <= 2400;
+
+            // The FPGA_GEMM.cpp code assumes contiguous ggml memory:
+            //   src0: dequantized flat order W[n*K + k]
+            //   src1: F32 flat order B[m*K + k]
+            //   dst : F32 flat order C[m*N + n]
+            const bool src0_contig = ggml_is_contiguous(src0);
+            const bool src1_contig = src1->type == GGML_TYPE_F32 && src1->nb[0] == sizeof(float) &&
+                                     src1->nb[1] == (size_t) (ne10 * (int64_t) sizeof(float));
+            const bool dst_contig  = dst->type == GGML_TYPE_F32 && dst->nb[0] == sizeof(float) &&
+                                     dst->nb[1] == (size_t) (ne0 * (int64_t) sizeof(float));
+
+            const bool fpga_shape_ok = ne10 == ne00 &&  // src1 K must match src0 K
+                                       ne0 == ne01 &&   // dst N
+                                       ne1 == ne11 &&   // dst M
+                                       ne02 == 1 && ne03 == 1 && ne12 == 1 && ne13 == 1 && ne2 == 1 && ne3 == 1;
+
+            // Quantized rows must be block-aligned by K, not by K*N.
+            const bool quant_row_aligned = fpga_supported_type && ((K % qk_required) == 0);
+
+            if (fpga_gemm_is_ready() && fpga_supported_type && fpga_shape_ok && rtl_shape_ok && quant_row_aligned &&
+                src0_contig && src1_contig && dst_contig) {
                 if (ith == 0) {
-                    fpga_gemm_run(src0->data,                  // A_raw = weight   [K × N]  (quantized)
-                                  fpga_quant,                  // loại quant của weight
-                                  (const float *) src1->data,  // B_f32 = activation [M × K] (F32)
-                                  (float *) dst->data,         // C     = output     [M × N] (F32)
-                                  (int) ne11,                  // M
-                                  (int) ne00,                  // K_orig (padding xử lý trong driver)
-                                  (int) ne01,                  // N_orig (padding xử lý trong driver)
-                                  0                            // shift = 0 → tự tính trong driver
-                    );
+                    fpga_gemm_run(src0->data,                  // ggml weight src0, logical [K,N], stored W[n*K+k]
+                                  fpga_quant,
+                                  (const float *) src1->data,  // activation, logical [K,M], passed as B[m*K+k]
+                                  (float *) dst->data,         // output dst, C[m*N+n]
+                                  (int) M, (int) K, (int) N,
+                                  0);                          // 0 = auto shift in FPGA_GEMM.cpp
                 }
-                ggml_barrier(params->threadpool);
+                if (nth > 1) {
+                    ggml_barrier(params->threadpool);
+                }
                 return;
             }
         }
