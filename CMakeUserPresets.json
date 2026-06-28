@@ -1,0 +1,1 @@
+{"version":3,"configurePresets":[{"name":"debug-fpga","displayName":"Debug FPGA","binaryDir":"${sourceDir}/build","cacheVariables":{"CMAKE_BUILD_TYPE":"Debug","DGGML_USE_FPGA":"ON"}}]}
