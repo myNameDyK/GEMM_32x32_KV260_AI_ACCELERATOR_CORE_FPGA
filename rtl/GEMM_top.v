@@ -2,18 +2,18 @@
 
 module GEMM_top
 #(
-    parameter integer C_S_AXI_DATA_WIDTH = 32,
-    parameter integer C_S_AXI_ADDR_WIDTH = 4,
-    parameter integer A_size = 32,
-    parameter integer data_width = 8,
-    parameter integer shift_width = 10,
-    parameter integer Weight_Block_num = 2400,
-    parameter integer IN_Feature_Block_num = 2400,
-    parameter integer OUT_Feature_Block_num = 2400,
-    parameter integer OUT_MEM_WIDTH = 32,
-    parameter integer F_length_width = 9,
-    parameter integer F_width_block_num_width = 5,
-    parameter integer W_width_block_num_width = 5
+    parameter integer P_AXI_LITE_DATA_WIDTH = 32,
+    parameter integer P_AXI_LITE_ADDR_WIDTH = 4,
+    parameter integer P_ARRAY_SIZE = 32,
+    parameter integer P_DATA_WIDTH = 8,
+    parameter integer P_SHIFT_WIDTH = 10,
+    parameter integer P_WEIGHT_BUFFER_DEPTH = 2400,
+    parameter integer P_FEATURE_BUFFER_DEPTH = 2400,
+    parameter integer P_OUTPUT_BUFFER_DEPTH = 2400,
+    parameter integer P_ACCUM_WIDTH = 32,
+    parameter integer P_ROW_COUNT_WIDTH = 9,
+    parameter integer P_K_BLOCK_COUNT_WIDTH = 5,
+    parameter integer P_N_BLOCK_COUNT_WIDTH = 5
 )
 (
     //----------------------------------
@@ -22,13 +22,13 @@ module GEMM_top
     input wire  S_AXI_ACLK,
     input wire  S_AXI_ARESETN,
 
-    input wire [C_S_AXI_ADDR_WIDTH-1:0] S_AXI_AWADDR,
+    input wire [P_AXI_LITE_ADDR_WIDTH-1:0] S_AXI_AWADDR,
     input wire [2:0] S_AXI_AWPROT,
     input wire S_AXI_AWVALID,
     output wire S_AXI_AWREADY,
 
-    input wire [C_S_AXI_DATA_WIDTH-1:0] S_AXI_WDATA,
-    input wire [(C_S_AXI_DATA_WIDTH/8)-1:0] S_AXI_WSTRB,
+    input wire [P_AXI_LITE_DATA_WIDTH-1:0] S_AXI_WDATA,
+    input wire [(P_AXI_LITE_DATA_WIDTH/8)-1:0] S_AXI_WSTRB,
     input wire S_AXI_WVALID,
     output wire S_AXI_WREADY,
 
@@ -36,12 +36,12 @@ module GEMM_top
     output wire S_AXI_BVALID,
     input wire S_AXI_BREADY,
 
-    input wire [C_S_AXI_ADDR_WIDTH-1:0] S_AXI_ARADDR,
+    input wire [P_AXI_LITE_ADDR_WIDTH-1:0] S_AXI_ARADDR,
     input wire [2:0] S_AXI_ARPROT,
     input wire S_AXI_ARVALID,
     output wire S_AXI_ARREADY,
 
-    output wire [C_S_AXI_DATA_WIDTH-1:0] S_AXI_RDATA,
+    output wire [P_AXI_LITE_DATA_WIDTH-1:0] S_AXI_RDATA,
     output wire [1:0] S_AXI_RRESP,
     output wire S_AXI_RVALID,
     input wire S_AXI_RREADY,
@@ -50,8 +50,8 @@ module GEMM_top
     // Feature AXIS Slave
     //----------------------------------
     output wire         feature_axis_tready,
-    input  wire [A_size*data_width-1:0] feature_axis_tdata,
-    input  wire [(A_size*data_width/8)-1:0]  feature_axis_tstrb,
+    input  wire [P_ARRAY_SIZE*P_DATA_WIDTH-1:0] feature_axis_tdata,
+    input  wire [(P_ARRAY_SIZE*P_DATA_WIDTH/8)-1:0]  feature_axis_tstrb,
     input  wire         feature_axis_tlast,
     input  wire         feature_axis_tvalid,
 
@@ -59,8 +59,8 @@ module GEMM_top
     // Weight AXIS Slave
     //----------------------------------
     output wire         weight_axis_tready,
-    input  wire [A_size*data_width-1:0] weight_axis_tdata,
-    input  wire [(A_size*data_width/8)-1:0]  weight_axis_tstrb,
+    input  wire [P_ARRAY_SIZE*P_DATA_WIDTH-1:0] weight_axis_tdata,
+    input  wire [(P_ARRAY_SIZE*P_DATA_WIDTH/8)-1:0]  weight_axis_tstrb,
     input  wire         weight_axis_tlast,
     input  wire         weight_axis_tvalid,
 
@@ -68,8 +68,8 @@ module GEMM_top
     // Result AXIS Master
     //----------------------------------
     output wire         result_axis_tvalid,
-    output wire [A_size*data_width-1:0] result_axis_tdata,
-    output wire [(A_size*data_width/8)-1:0]  result_axis_tstrb,
+    output wire [P_ARRAY_SIZE*P_DATA_WIDTH-1:0] result_axis_tdata,
+    output wire [(P_ARRAY_SIZE*P_DATA_WIDTH/8)-1:0]  result_axis_tstrb,
     output wire         result_axis_tlast,
     input  wire         result_axis_tready
 );
@@ -79,21 +79,35 @@ module GEMM_top
 // AXI-Lite Control Registers
 //=====================================================
 
-wire [shift_width-1:0] shift;
-wire [F_length_width-1:0] F_length;
-wire [F_width_block_num_width-1:0] F_width;
-wire [W_width_block_num_width-1:0] W_width;
+wire [P_SHIFT_WIDTH-1:0] cfg_shift;
+wire [P_ROW_COUNT_WIDTH-1:0] cfg_row_count;
+wire [P_K_BLOCK_COUNT_WIDTH-1:0] cfg_k_block_count;
+wire [P_N_BLOCK_COUNT_WIDTH-1:0] cfg_n_block_count;
+wire w_job_start_clear;
+reg  r_job_busy;
+reg  r_job_done;
+wire w_job_idle;
+reg  r_job_clear_accepted;
+reg  r_job_clear_busy_error;
 
-Control_register_file #(
-    .C_S_AXI_DATA_WIDTH(C_S_AXI_DATA_WIDTH),
-    .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH)
+assign w_job_idle = ~r_job_busy;
+
+ControlRegisterFile #(
+    .P_AXI_LITE_DATA_WIDTH(P_AXI_LITE_DATA_WIDTH),
+    .P_AXI_LITE_ADDR_WIDTH(P_AXI_LITE_ADDR_WIDTH)
 )
-u_control_register_file
+u_control_registers
 (
-    .shift_out(shift),
-    .F_length_out(F_length),
-    .F_width_out(F_width),
-    .W_width_out(W_width),
+    .o_cfg_shift(cfg_shift),
+    .o_cfg_row_count(cfg_row_count),
+    .o_cfg_k_block_count(cfg_k_block_count),
+    .o_cfg_n_block_count(cfg_n_block_count),
+    .o_job_start_clear(w_job_start_clear),
+    .i_job_busy(r_job_busy),
+    .i_job_done(r_job_done),
+    .i_job_idle(w_job_idle),
+    .i_job_clear_accepted(r_job_clear_accepted),
+    .i_job_clear_busy_error(r_job_clear_busy_error),
 
     .S_AXI_ACLK(S_AXI_ACLK),
     .S_AXI_ARESETN(S_AXI_ARESETN),
@@ -128,35 +142,76 @@ u_control_register_file
 // AXIS Signals
 //=====================================================
 
-wire [A_size*data_width-1:0] feature_data;
-wire         feature_valid;
-wire         feature_last;
-wire         feature_ready;
+wire [P_ARRAY_SIZE*P_DATA_WIDTH-1:0] w_feature_stream_data;
+wire         w_feature_stream_valid;
+wire         w_feature_stream_last;
+wire         w_feature_stream_ready;
 
-wire [A_size*data_width-1:0] weight_data;
-wire         weight_valid;
-wire         weight_last;
-wire         weight_ready;
+wire [P_ARRAY_SIZE*P_DATA_WIDTH-1:0] w_weight_stream_data;
+wire         w_weight_stream_valid;
+wire         w_weight_stream_last;
+wire         w_weight_stream_ready;
 
-wire [A_size*data_width-1:0] result_data;
-wire         result_valid;
-wire         result_last;
-wire         result_ready;
+wire [P_ARRAY_SIZE*P_DATA_WIDTH-1:0] w_result_stream_data;
+wire         w_result_stream_valid;
+wire         w_result_stream_last;
+wire         w_result_stream_ready;
+
+wire w_feature_stream_accept;
+wire w_weight_stream_accept;
+wire w_result_stream_accept;
+wire w_final_result_accept;
+
+assign w_feature_stream_accept = w_feature_stream_valid & w_feature_stream_ready;
+assign w_weight_stream_accept = w_weight_stream_valid & w_weight_stream_ready;
+assign w_result_stream_accept = w_result_stream_valid & w_result_stream_ready;
+assign w_final_result_accept = w_result_stream_accept & w_result_stream_last;
+
+always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+    if(~S_AXI_ARESETN) begin
+        r_job_busy <= 0;
+        r_job_done <= 0;
+        r_job_clear_accepted <= 0;
+        r_job_clear_busy_error <= 0;
+    end
+    else begin
+        r_job_clear_accepted <= 0;
+        r_job_clear_busy_error <= 0;
+
+        if(w_job_start_clear) begin
+            if(r_job_busy)
+                r_job_clear_busy_error <= 1;
+            else begin
+                r_job_done <= 0;
+                r_job_clear_accepted <= 1;
+            end
+        end
+
+        if(w_final_result_accept) begin
+            r_job_busy <= 0;
+            r_job_done <= 1;
+        end
+        else if(w_feature_stream_accept | w_weight_stream_accept | w_result_stream_valid) begin
+            r_job_busy <= 1;
+            r_job_done <= 0;
+        end
+    end
+end
 
 
 //=====================================================
 // Feature AXIS
 //=====================================================
 
-Feature_stream_slave #(
-    .C_feature_axis_TDATA_WIDTH(A_size*data_width)
+FeatureStreamSlave #(
+    .P_FEATURE_AXIS_DATA_WIDTH(P_ARRAY_SIZE*P_DATA_WIDTH)
 )
 u_feature_stream_slave
 (
-    .feature_data(feature_data),
-    .feature_valid(feature_valid),
-    .feature_last(feature_last),
-    .feature_ready(feature_ready),
+    .o_feature_stream_data(w_feature_stream_data),
+    .o_feature_stream_valid(w_feature_stream_valid),
+    .o_feature_stream_last(w_feature_stream_last),
+    .i_feature_stream_ready(w_feature_stream_ready),
 
     .feature_axis_aclk(S_AXI_ACLK),
     .feature_axis_aresetn(S_AXI_ARESETN),
@@ -172,15 +227,15 @@ u_feature_stream_slave
 // Weight AXIS
 //=====================================================
 
-Weight_stream_slave #(
-    .C_weight_axis_TDATA_WIDTH(A_size*data_width)
+WeightStreamSlave #(
+    .P_WEIGHT_AXIS_DATA_WIDTH(P_ARRAY_SIZE*P_DATA_WIDTH)
 )
 u_weight_stream_slave
 (
-    .weight_data(weight_data),
-    .weight_valid(weight_valid),
-    .weight_last(weight_last),
-    .weight_ready(weight_ready),
+    .o_weight_stream_data(w_weight_stream_data),
+    .o_weight_stream_valid(w_weight_stream_valid),
+    .o_weight_stream_last(w_weight_stream_last),
+    .i_weight_stream_ready(w_weight_stream_ready),
 
     .weight_axis_aclk(S_AXI_ACLK),
     .weight_axis_aresetn(S_AXI_ARESETN),
@@ -196,42 +251,42 @@ u_weight_stream_slave
 // GEMM Core
 //=====================================================
 
-GEMM_core #(
-    .A_size(A_size),
-    .data_width(data_width),
-    .shift_width(shift_width),
-    .Weight_Block_num(Weight_Block_num),
-    .IN_Feature_Block_num(IN_Feature_Block_num),
-    .OUT_Feature_Block_num(OUT_Feature_Block_num),
-    .OUT_MEM_WIDTH(OUT_MEM_WIDTH),
-    .F_length_width(F_length_width),
-    .F_width_block_num_width(F_width_block_num_width),
-    .W_width_block_num_width(W_width_block_num_width)
+GemmAccelerator #(
+    .P_ARRAY_SIZE(P_ARRAY_SIZE),
+    .P_DATA_WIDTH(P_DATA_WIDTH),
+    .P_SHIFT_WIDTH(P_SHIFT_WIDTH),
+    .P_WEIGHT_BUFFER_DEPTH(P_WEIGHT_BUFFER_DEPTH),
+    .P_FEATURE_BUFFER_DEPTH(P_FEATURE_BUFFER_DEPTH),
+    .P_OUTPUT_BUFFER_DEPTH(P_OUTPUT_BUFFER_DEPTH),
+    .P_ACCUM_WIDTH(P_ACCUM_WIDTH),
+    .P_ROW_COUNT_WIDTH(P_ROW_COUNT_WIDTH),
+    .P_K_BLOCK_COUNT_WIDTH(P_K_BLOCK_COUNT_WIDTH),
+    .P_N_BLOCK_COUNT_WIDTH(P_N_BLOCK_COUNT_WIDTH)
 )
-u_gemm_core
+u_gemm_accelerator
 (
-    .clk(S_AXI_ACLK),
-    .rst_n(S_AXI_ARESETN),
+    .i_clk(S_AXI_ACLK),
+    .i_rst_n(S_AXI_ARESETN),
 
-    .shift_in(shift),
-    .F_length_in(F_length),
-    .F_width_block_num_in(F_width),
-    .W_width_block_num_in(W_width),
+    .i_cfg_shift(cfg_shift),
+    .i_cfg_row_count(cfg_row_count),
+    .i_cfg_k_block_count(cfg_k_block_count),
+    .i_cfg_n_block_count(cfg_n_block_count),
 
-    .in_F_valid(feature_valid),
-    .in_F_last(feature_last),
-    .in_F_ready(feature_ready),
-    .in_F_data(feature_data),
+    .i_feature_valid(w_feature_stream_valid),
+    .i_feature_last(w_feature_stream_last),
+    .o_feature_ready(w_feature_stream_ready),
+    .i_feature_data(w_feature_stream_data),
 
-    .in_W_valid(weight_valid),
-    .in_W_last(weight_last),
-    .in_W_ready(weight_ready),
-    .in_W_data(weight_data),
+    .i_weight_valid(w_weight_stream_valid),
+    .i_weight_last(w_weight_stream_last),
+    .o_weight_ready(w_weight_stream_ready),
+    .i_weight_data(w_weight_stream_data),
 
-    .out_data_valid(result_valid),
-    .out_data_ready(result_ready),
-    .out_data_last(result_last),
-    .out_data(result_data)
+    .o_result_valid(w_result_stream_valid),
+    .i_result_ready(w_result_stream_ready),
+    .o_result_last(w_result_stream_last),
+    .o_result_data(w_result_stream_data)
 );
 
 
@@ -239,15 +294,15 @@ u_gemm_core
 // Result AXIS
 //=====================================================
 
-Result_stream_master #(
-    .C_result_axis_TDATA_WIDTH(A_size*data_width)
+ResultStreamMaster #(
+    .P_RESULT_AXIS_DATA_WIDTH(P_ARRAY_SIZE*P_DATA_WIDTH)
 )
 u_result_stream_master
 (
-    .result_data(result_data),
-    .result_valid(result_valid),
-    .result_last(result_last),
-    .result_ready(result_ready),
+    .i_result_stream_data(w_result_stream_data),
+    .i_result_stream_valid(w_result_stream_valid),
+    .i_result_stream_last(w_result_stream_last),
+    .o_result_stream_ready(w_result_stream_ready),
 
     .result_axis_aclk(S_AXI_ACLK),
     .result_axis_aresetn(S_AXI_ARESETN),

@@ -1,31 +1,31 @@
-module Weight_stream_slave #
+module WeightStreamSlave #
 (
-    parameter integer C_weight_axis_TDATA_WIDTH = 256
+    parameter integer P_WEIGHT_AXIS_DATA_WIDTH = 256
 )
 (
-    output wire [C_weight_axis_TDATA_WIDTH-1:0] weight_data,
-    output wire         weight_valid,
-    output wire         weight_last,
-    input  wire         weight_ready,
+    output wire [P_WEIGHT_AXIS_DATA_WIDTH-1:0] o_weight_stream_data,
+    output wire         o_weight_stream_valid,
+    output wire         o_weight_stream_last,
+    input  wire         i_weight_stream_ready,
 
     input wire  weight_axis_aclk,
     input wire  weight_axis_aresetn,
     output wire weight_axis_tready,
-    input wire [C_weight_axis_TDATA_WIDTH-1:0] weight_axis_tdata,
-    input wire [(C_weight_axis_TDATA_WIDTH/8)-1:0] weight_axis_tstrb,
+    input wire [P_WEIGHT_AXIS_DATA_WIDTH-1:0] weight_axis_tdata,
+    input wire [(P_WEIGHT_AXIS_DATA_WIDTH/8)-1:0] weight_axis_tstrb,
     input wire         weight_axis_tlast,
     input wire         weight_axis_tvalid
 );
 
-weight_axis_v1_0_weight_axis #(
-    .C_S_AXIS_TDATA_WIDTH(C_weight_axis_TDATA_WIDTH)
+WeightAxisFullBeatSlave #(
+    .P_STREAM_DATA_WIDTH(P_WEIGHT_AXIS_DATA_WIDTH)
 )
-u_weight_stream_slave_axis
+u_weight_axis_full_beat_slave
 (
-    .weight_data(weight_data),
-    .weight_valid(weight_valid),
-    .weight_last(weight_last),
-    .weight_ready(weight_ready),
+    .o_weight_stream_data(o_weight_stream_data),
+    .o_weight_stream_valid(o_weight_stream_valid),
+    .o_weight_stream_last(o_weight_stream_last),
+    .i_weight_stream_ready(i_weight_stream_ready),
 
     .S_AXIS_ACLK(weight_axis_aclk),
     .S_AXIS_ARESETN(weight_axis_aresetn),

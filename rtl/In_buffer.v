@@ -2,267 +2,270 @@
 `define IDLE 2'b00
 `define IN_DATA 2'b01
 `define CAL 2'b11
-// reg [A_size * data_width - 1:0] in_F_array [Feature_Width_Block_num * Feature_Length : 0];
-// reg [A_size * data_width - 1:0] in_W_array [A_size * Weight_Width_Block_num * Feature_Width_Block_num : 0];
-module In_buffer
+// reg [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0] r_feature_buffer_mem [Feature_Width_Block_num * Feature_Length : 0];
+// reg [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0] r_weight_buffer_mem [P_ARRAY_SIZE * Weight_Width_Block_num * Feature_Width_Block_num : 0];
+module InputBuffer
 #(
-    parameter integer                               A_size = 32,
-    parameter integer                               data_width = 8,
-    parameter integer                               Weight_Block_num = 2400, 
-    parameter integer                               IN_Feature_Block_num = 2400,
-    parameter integer                               F_length_width = 10,
-    parameter integer                               F_width_block_num_width = 5,
-    parameter integer                               W_width_block_num_width = 5
+    parameter integer                               P_ARRAY_SIZE = 32,
+    parameter integer                               P_DATA_WIDTH = 8,
+    parameter integer                               P_WEIGHT_BUFFER_DEPTH = 2400, 
+    parameter integer                               P_FEATURE_BUFFER_DEPTH = 2400,
+    parameter integer                               P_ROW_COUNT_WIDTH = 10,
+    parameter integer                               P_K_BLOCK_COUNT_WIDTH = 5,
+    parameter integer                               P_N_BLOCK_COUNT_WIDTH = 5
 )(
-    input                                           clk,
-    input                                           rst_n,
+    input                                           i_clk,
+    input                                           i_rst_n,
     
-    input [W_width_block_num_width-1:0]             W_width_block_num, //1 ~ block_num
+    input [P_N_BLOCK_COUNT_WIDTH-1:0]             i_cfg_n_block_count, //1 ~ block_num
 
 
-    input [F_width_block_num_width-1:0]             F_width_block_num, //1 ~ block_num
-    input [F_length_width-1:0]                      F_length, //1 ~ block_num *A_size
+    input [P_K_BLOCK_COUNT_WIDTH-1:0]             i_cfg_k_block_count, //1 ~ block_num
+    input [P_ROW_COUNT_WIDTH-1:0]                      i_cfg_row_count, //1 ~ block_num *P_ARRAY_SIZE
 
-    input                                           MM_buffer_out_last,
+    input                                           i_compute_partial_last,
 
-    input                                           in_F_valid,
-    input                                           in_F_last,
-    output                                          in_F_ready,
-    input [A_size * data_width - 1:0]               in_F_data,
+    input                                           i_feature_valid,
+    input                                           i_feature_last,
+    output                                          o_feature_ready,
+    input [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]               i_feature_data,
 
-    input                                           in_W_valid,
-    input                                           in_W_last,
-    output                                          in_W_ready,
-    input [A_size * data_width - 1:0]               in_W_data,
+    input                                           i_weight_valid,
+    input                                           i_weight_last,
+    output                                          o_weight_ready,
+    input [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]               i_weight_data,
 
-    output reg                                      in_MM_buffer_F_valid,
-    output                                          in_MM_buffer_F_last,
-    input                                           in_MM_buffer_F_ready,
-    output reg [A_size * data_width - 1:0]          in_MM_buffer_F_data,
+    output reg                                      o_buffer_feature_valid,
+    output                                          o_buffer_feature_last,
+    input                                           i_buffer_feature_ready,
+    output reg [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]              o_buffer_feature_data,
 
-    output reg                                      in_MM_buffer_W_valid,
-    output                                          in_MM_buffer_W_last,
-    input                                           in_MM_buffer_W_ready,
-    output reg [A_size * data_width - 1:0]          in_MM_buffer_W_data
+    output reg                                      o_buffer_weight_valid,
+    output                                          o_buffer_weight_last,
+    input                                           i_buffer_weight_ready,
+    output reg [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]              o_buffer_weight_data
 
 );
-function integer clogb2 (input integer bit_depth);              
-begin:log
-    automatic integer temp;
-    temp = 0;                                                        
-    for(clogb2=0; bit_depth>0; clogb2=clogb2+1)begin
-        if(bit_depth[0] & bit_depth!=1)
-            temp = 1;                   
-        bit_depth = bit_depth >> 1;
-    end
-    clogb2 = clogb2 + temp - 1;                                   
-end                                                   
-endfunction
 
-localparam integer F_size_width = clogb2(IN_Feature_Block_num);
-localparam integer W_size_width = clogb2(Weight_Block_num);
-localparam integer log_A_size = clogb2(A_size);
-wire start;
+localparam integer LP_F_ADDR_WIDTH = (P_FEATURE_BUFFER_DEPTH <= 1) ? 1 : $clog2(P_FEATURE_BUFFER_DEPTH);
+localparam integer LP_W_ADDR_WIDTH = (P_WEIGHT_BUFFER_DEPTH <= 1) ? 1 : $clog2(P_WEIGHT_BUFFER_DEPTH);
+localparam integer LP_LOG_A_SIZE = (P_ARRAY_SIZE <= 1) ? 1 : $clog2(P_ARRAY_SIZE);
 
-reg [A_size * data_width - 1:0] in_F_array [IN_Feature_Block_num - 1 : 0];
-reg [A_size * data_width - 1:0] in_W_array [Weight_Block_num - 1 : 0];
+wire w_start_readout;
+wire w_accept_feature_word;
+wire w_accept_weight_word;
+wire w_accept_buffer_feature_word;
+wire w_accept_buffer_weight_word;
+
+reg [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0] r_feature_buffer_mem [P_FEATURE_BUFFER_DEPTH - 1 : 0];
+reg [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0] r_weight_buffer_mem [P_WEIGHT_BUFFER_DEPTH - 1 : 0];
  
 reg [1:0]                                    state;
-reg [W_size_width-1:0]                       W_block_size;
-reg [F_size_width-1:0]                       F_block_size; 
+reg [LP_W_ADDR_WIDTH-1:0]                    r_weight_words_expected;
+reg [LP_F_ADDR_WIDTH-1:0]                    r_feature_words_expected; 
 
-reg [F_size_width-1:0]                       in_F_cnt;
-reg [F_size_width-1:0]                       in_F_addr;
+reg [LP_F_ADDR_WIDTH-1:0]                    r_feature_write_count;
+reg [LP_F_ADDR_WIDTH-1:0]                    r_feature_write_addr;
 
-reg [W_size_width-1:0]                       in_W_cnt;
-reg [W_size_width-1:0]                       in_W_addr;
+reg [LP_W_ADDR_WIDTH-1:0]                    r_weight_write_count;
+reg [LP_W_ADDR_WIDTH-1:0]                    r_weight_write_addr;
 
-reg [F_size_width-1:0]                       in_MM_buffer_F_cnt;
-reg [F_length_width-1:0]                     out_F_row_addr;
-reg [F_width_block_num_width-1:0]            out_F_col_addr;
-wire [F_size_width-1:0]                      out_F_addr;
+reg [LP_F_ADDR_WIDTH-1:0]                    r_buffer_feature_count;
+reg [P_ROW_COUNT_WIDTH-1:0]                     r_feature_read_row;
+reg [P_K_BLOCK_COUNT_WIDTH-1:0]            r_feature_read_k_block;
+wire [LP_F_ADDR_WIDTH-1:0]                   w_feature_read_addr;
 
-reg [W_size_width-1:0]                       in_MM_buffer_W_cnt;
-reg [W_size_width-1:0]                       out_W_addr;
+reg [LP_W_ADDR_WIDTH-1:0]                    r_buffer_weight_count;
+reg [LP_W_ADDR_WIDTH-1:0]                    r_weight_read_addr;
 
 
-assign in_F_ready = (in_F_cnt < F_block_size) & (state != `CAL);
-assign in_W_ready = (in_W_cnt < W_block_size) & (state != `CAL);
-assign out_F_addr = out_F_row_addr * F_width_block_num + out_F_col_addr;
-assign start = ((in_F_cnt == F_block_size & in_W_cnt == W_block_size) 
-                | MM_buffer_out_last)
-                & (out_F_col_addr!=F_width_block_num);
-assign in_MM_buffer_F_last = in_MM_buffer_F_cnt == F_length - 1;
-assign in_MM_buffer_W_last = in_MM_buffer_W_cnt == W_width_block_num * A_size - 1; 
-
-initial F_block_size=0;
-always @(posedge clk ) begin
-    F_block_size <= F_length * F_width_block_num;
+assign o_feature_ready = (r_feature_write_count < r_feature_words_expected) & (state == `IN_DATA);
+assign o_weight_ready = (r_weight_write_count < r_weight_words_expected) & (state == `IN_DATA);
+assign w_feature_read_addr = r_feature_read_row * i_cfg_k_block_count + r_feature_read_k_block;
+assign w_start_readout = ((((r_feature_words_expected != 0) && (r_weight_words_expected != 0) &&
+                      (r_feature_write_count == r_feature_words_expected) && (r_weight_write_count == r_weight_words_expected))
+                    | i_compute_partial_last)
+                    & (i_cfg_k_block_count != 0)
+                    & (r_feature_read_k_block!=i_cfg_k_block_count));
+assign w_accept_feature_word = i_feature_valid & o_feature_ready;
+assign w_accept_weight_word = i_weight_valid & o_weight_ready;
+assign w_accept_buffer_feature_word = o_buffer_feature_valid & i_buffer_feature_ready;
+assign w_accept_buffer_weight_word = o_buffer_weight_valid & i_buffer_weight_ready;
+assign o_buffer_feature_last = r_buffer_feature_count == i_cfg_row_count - 1;
+assign o_buffer_weight_last = r_buffer_weight_count == i_cfg_n_block_count * P_ARRAY_SIZE - 1; 
+always @(posedge i_clk or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_feature_words_expected <= 0;
+    else
+        r_feature_words_expected <= i_cfg_row_count * i_cfg_k_block_count;
 end
 
-reg [log_A_size + F_width_block_num_width-1:0] temp_m;
-initial temp_m = 0;
-initial W_block_size=0;
-always @(posedge clk ) begin
-    temp_m <= F_width_block_num *A_size;
-    W_block_size <= W_width_block_num * temp_m;
+reg [LP_LOG_A_SIZE + P_K_BLOCK_COUNT_WIDTH-1:0] r_k_elements_per_n_block;
+always @(posedge i_clk or negedge i_rst_n) begin
+    if(~i_rst_n) begin
+        r_k_elements_per_n_block <= 0;
+        r_weight_words_expected <= 0;
+    end
+    else begin
+        r_k_elements_per_n_block <= i_cfg_k_block_count * P_ARRAY_SIZE;
+        r_weight_words_expected <= i_cfg_n_block_count * r_k_elements_per_n_block;
+    end
 end
 
-always @(posedge clk ) begin
-    if(in_F_valid & in_F_ready)
-        in_F_array[in_F_addr] <= in_F_data;
+always @(posedge i_clk ) begin
+    if(w_accept_feature_word)
+        r_feature_buffer_mem[r_feature_write_addr] <= i_feature_data;
 end
 
-always @(posedge clk ) begin
-    if(in_W_valid & in_W_ready)
-        in_W_array[in_W_addr] <= in_W_data;
+always @(posedge i_clk ) begin
+    if(w_accept_weight_word)
+        r_weight_buffer_mem[r_weight_write_addr] <= i_weight_data;
 end
 
-always @(posedge clk) begin
-    in_MM_buffer_F_data <= in_F_array[out_F_addr];
+always @(posedge i_clk) begin
+    o_buffer_feature_data <= r_feature_buffer_mem[w_feature_read_addr];
 end
 
-
-always @(posedge clk) begin
-    in_MM_buffer_W_data <= in_W_array[out_W_addr];
+always @(posedge i_clk) begin
+    o_buffer_weight_data <= r_weight_buffer_mem[r_weight_read_addr];
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
         state <= `IDLE;
-    else if (state == `IDLE & (in_F_valid | in_W_valid))
+    else if (state == `IDLE & (i_feature_valid | i_weight_valid))
         state <= `IN_DATA;
-    else if (state == `IN_DATA & start)
+    else if (state == `IN_DATA & w_start_readout)
         state <= `CAL;
-    else if (state == `CAL & MM_buffer_out_last 
-            & ( out_F_col_addr == F_width_block_num))
+    else if (state == `CAL & i_compute_partial_last 
+            & ( r_feature_read_k_block == i_cfg_k_block_count))
         state <= `IDLE;
     else
         state <= state;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        in_F_cnt<=0;
-    else if (start)
-        in_F_cnt <= 0;
-    else if (in_F_valid & in_F_ready)
-        in_F_cnt <= in_F_cnt + 1;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_feature_write_count<=0;
+    else if (w_start_readout)
+        r_feature_write_count <= 0;
+    else if (w_accept_feature_word)
+        r_feature_write_count <= r_feature_write_count + 1;
     else
-        in_F_cnt <= in_F_cnt;
+        r_feature_write_count <= r_feature_write_count;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        in_F_addr<=0;
-    else if (in_F_last)
-        in_F_addr <= 0;
-    else if (in_F_valid & in_F_ready)
-        in_F_addr <= in_F_addr + 1;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_feature_write_addr<=0;
+    else if (w_accept_feature_word & i_feature_last)
+        r_feature_write_addr <= 0;
+    else if (w_accept_feature_word)
+        r_feature_write_addr <= r_feature_write_addr + 1;
     else
-        in_F_addr <= in_F_addr;
+        r_feature_write_addr <= r_feature_write_addr;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        in_W_cnt<=0;
-    else if (start)
-        in_W_cnt <= 0;
-    else if (in_W_valid & in_W_ready)
-        in_W_cnt <= in_W_cnt + 1;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_weight_write_count<=0;
+    else if (w_start_readout)
+        r_weight_write_count <= 0;
+    else if (w_accept_weight_word)
+        r_weight_write_count <= r_weight_write_count + 1;
     else
-        in_W_cnt <= in_W_cnt;
+        r_weight_write_count <= r_weight_write_count;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        in_W_addr<=0;
-    else if (in_W_last)
-        in_W_addr <= 0;
-    else if (in_W_valid & in_W_ready)
-        in_W_addr <= in_W_addr + 1;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_weight_write_addr<=0;
+    else if (w_accept_weight_word & i_weight_last)
+        r_weight_write_addr <= 0;
+    else if (w_accept_weight_word)
+        r_weight_write_addr <= r_weight_write_addr + 1;
     else
-        in_W_addr <= in_W_addr;
+        r_weight_write_addr <= r_weight_write_addr;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        in_MM_buffer_F_valid <= 0;
-    else if(start)
-        in_MM_buffer_F_valid <= 1;
-    else if (in_MM_buffer_F_last)
-        in_MM_buffer_F_valid <= 0;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        o_buffer_feature_valid <= 0;
+    else if(w_start_readout)
+        o_buffer_feature_valid <= 1;
+    else if (w_accept_buffer_feature_word & o_buffer_feature_last)
+        o_buffer_feature_valid <= 0;
     else 
-        in_MM_buffer_F_valid<=in_MM_buffer_F_valid;
+        o_buffer_feature_valid<=o_buffer_feature_valid;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        in_MM_buffer_F_cnt<=0;
-    else if (in_MM_buffer_F_cnt == F_length)
-        in_MM_buffer_F_cnt<=0;
-    else if (in_MM_buffer_F_valid & in_MM_buffer_F_ready)
-        in_MM_buffer_F_cnt<=in_MM_buffer_F_cnt+1;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_buffer_feature_count<=0;
+    else if (r_buffer_feature_count == i_cfg_row_count)
+        r_buffer_feature_count<=0;
+    else if (w_accept_buffer_feature_word)
+        r_buffer_feature_count<=r_buffer_feature_count+1;
     else
-        in_MM_buffer_F_cnt <= in_MM_buffer_F_cnt;
+        r_buffer_feature_count <= r_buffer_feature_count;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        out_F_row_addr <= 0;
-    else if (start)
-        out_F_row_addr <= 1;
-    else if (out_F_row_addr == F_length - 1)
-        out_F_row_addr <= 0;
-    else if (out_F_row_addr != 0 & in_MM_buffer_F_valid & in_MM_buffer_F_ready)
-        out_F_row_addr <= out_F_row_addr + 1;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_feature_read_row <= 0;
+    else if (w_start_readout)
+        r_feature_read_row <= 1;
+    else if (r_feature_read_row == i_cfg_row_count - 1)
+        r_feature_read_row <= 0;
+    else if (r_feature_read_row != 0 & w_accept_buffer_feature_word)
+        r_feature_read_row <= r_feature_read_row + 1;
     else
-        out_F_row_addr <= out_F_row_addr;
+        r_feature_read_row <= r_feature_read_row;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-       out_F_col_addr <= 0;
-    else if (MM_buffer_out_last & out_F_col_addr == F_width_block_num)
-        out_F_col_addr <= 0; 
-    else if(in_MM_buffer_F_last)
-        out_F_col_addr <= out_F_col_addr + 1;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+       r_feature_read_k_block <= 0;
+    else if (i_compute_partial_last & r_feature_read_k_block == i_cfg_k_block_count)
+        r_feature_read_k_block <= 0; 
+    else if(w_accept_buffer_feature_word & o_buffer_feature_last)
+        r_feature_read_k_block <= r_feature_read_k_block + 1;
     else
-        out_F_col_addr <= out_F_col_addr;
+        r_feature_read_k_block <= r_feature_read_k_block;
 end
 
-always @(posedge clk  or negedge rst_n) begin
-    if(~rst_n)
-        in_MM_buffer_W_valid <= 0;
-    else if(start)
-        in_MM_buffer_W_valid <= 1;
-    else if (in_MM_buffer_W_last)
-        in_MM_buffer_W_valid <= 0;
+always @(posedge i_clk  or negedge i_rst_n) begin
+    if(~i_rst_n)
+        o_buffer_weight_valid <= 0;
+    else if(w_start_readout)
+        o_buffer_weight_valid <= 1;
+    else if (w_accept_buffer_weight_word & o_buffer_weight_last)
+        o_buffer_weight_valid <= 0;
     else 
-        in_MM_buffer_W_valid<=in_MM_buffer_W_valid;
+        o_buffer_weight_valid<=o_buffer_weight_valid;
 end
 
-always @(posedge clk or negedge rst_n) begin
-    if(~rst_n)
-        in_MM_buffer_W_cnt <= 0;
-    else if (in_MM_buffer_W_cnt == W_width_block_num * A_size)
-        in_MM_buffer_W_cnt <= 0;
-    else if (in_MM_buffer_W_valid & in_MM_buffer_W_ready)
-        in_MM_buffer_W_cnt<=in_MM_buffer_W_cnt+1;
+always @(posedge i_clk or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_buffer_weight_count <= 0;
+    else if (r_buffer_weight_count == i_cfg_n_block_count * P_ARRAY_SIZE)
+        r_buffer_weight_count <= 0;
+    else if (w_accept_buffer_weight_word)
+        r_buffer_weight_count<=r_buffer_weight_count+1;
     else
-        in_MM_buffer_W_cnt<=in_MM_buffer_W_cnt;
+        r_buffer_weight_count<=r_buffer_weight_count;
 end
 
-always @(posedge clk or negedge rst_n ) begin
-    if(~rst_n)
-        out_W_addr <= 0;
-    else if (out_W_addr== W_block_size -1)
-        out_W_addr <= 0;
-    else if ((start 
-            | (in_MM_buffer_W_valid & in_MM_buffer_W_ready))
-            & (~in_MM_buffer_W_last))
-        out_W_addr<=out_W_addr+1;
+always @(posedge i_clk or negedge i_rst_n ) begin
+    if(~i_rst_n)
+        r_weight_read_addr <= 0;
+    else if (r_weight_read_addr== r_weight_words_expected -1)
+        r_weight_read_addr <= 0;
+    else if ((w_start_readout
+            | w_accept_buffer_weight_word)
+            & (~o_buffer_weight_last))
+        r_weight_read_addr<=r_weight_read_addr+1;
     else
-        out_W_addr<=out_W_addr;
+        r_weight_read_addr<=r_weight_read_addr;
 end
 endmodule

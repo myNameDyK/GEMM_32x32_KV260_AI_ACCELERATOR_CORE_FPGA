@@ -1,35 +1,35 @@
 `timescale 1 ns / 1 ps
 
-module Feature_stream_slave #
+module FeatureStreamSlave #
 (
-    parameter integer C_feature_axis_TDATA_WIDTH = 256
+    parameter integer P_FEATURE_AXIS_DATA_WIDTH = 256
 )
 (
-    // Export sang GEMM_core
-    output wire [C_feature_axis_TDATA_WIDTH-1:0] feature_data,
-    output wire         feature_valid,
-    output wire         feature_last,
-    input  wire         feature_ready,
+    // Export sang GemmAccelerator
+    output wire [P_FEATURE_AXIS_DATA_WIDTH-1:0] o_feature_stream_data,
+    output wire         o_feature_stream_valid,
+    output wire         o_feature_stream_last,
+    input  wire         i_feature_stream_ready,
 
     // AXI Stream Slave
     input wire  feature_axis_aclk,
     input wire  feature_axis_aresetn,
     output wire feature_axis_tready,
-    input wire [C_feature_axis_TDATA_WIDTH-1:0] feature_axis_tdata,
-    input wire [(C_feature_axis_TDATA_WIDTH/8)-1:0] feature_axis_tstrb,
+    input wire [P_FEATURE_AXIS_DATA_WIDTH-1:0] feature_axis_tdata,
+    input wire [(P_FEATURE_AXIS_DATA_WIDTH/8)-1:0] feature_axis_tstrb,
     input wire feature_axis_tlast,
     input wire feature_axis_tvalid
 );
 
-feature_axis_v1_0_feature_axis #(
-    .C_S_AXIS_TDATA_WIDTH(C_feature_axis_TDATA_WIDTH)
+FeatureAxisFullBeatSlave #(
+    .P_STREAM_DATA_WIDTH(P_FEATURE_AXIS_DATA_WIDTH)
 )
-u_feature_stream_slave_axis
+u_feature_axis_full_beat_slave
 (
-    .feature_data(feature_data),
-    .feature_valid(feature_valid),
-    .feature_last(feature_last),
-    .feature_ready(feature_ready),
+    .o_feature_stream_data(o_feature_stream_data),
+    .o_feature_stream_valid(o_feature_stream_valid),
+    .o_feature_stream_last(o_feature_stream_last),
+    .i_feature_stream_ready(i_feature_stream_ready),
 
     .S_AXIS_ACLK(feature_axis_aclk),
     .S_AXIS_ARESETN(feature_axis_aresetn),

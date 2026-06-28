@@ -1,221 +1,213 @@
 `timescale 1ns / 1ps
 
 
-module GEMM_core
+module GemmAccelerator
 #(
-    parameter integer                                       A_size = 32,
-    parameter integer                                       data_width = 8,
-    parameter integer                                       shift_width = 10,
-    parameter integer                                       Weight_Block_num = 2400, 
-    parameter integer                                       IN_Feature_Block_num = 2400, 
-    parameter integer                                       OUT_Feature_Block_num = 2400,
-    parameter integer                                       OUT_MEM_WIDTH = 32,
-    parameter integer                                       F_length_width = 9,
-    parameter integer                                       F_width_block_num_width = 5,
-    parameter integer                                       W_width_block_num_width = 5
+    parameter integer                                       P_ARRAY_SIZE = 32,
+    parameter integer                                       P_DATA_WIDTH = 8,
+    parameter integer                                       P_SHIFT_WIDTH = 10,
+    parameter integer                                       P_WEIGHT_BUFFER_DEPTH = 2400, 
+    parameter integer                                       P_FEATURE_BUFFER_DEPTH = 2400, 
+    parameter integer                                       P_OUTPUT_BUFFER_DEPTH = 2400,
+    parameter integer                                       P_ACCUM_WIDTH = 32,
+    parameter integer                                       P_ROW_COUNT_WIDTH = 9,
+    parameter integer                                       P_K_BLOCK_COUNT_WIDTH = 5,
+    parameter integer                                       P_N_BLOCK_COUNT_WIDTH = 5
 )(
-    input                                                   clk,
-    input                                                   rst_n,
+    input                                                   i_clk,
+    input                                                   i_rst_n,
 
 
-    input [shift_width-1:0]                                 shift_in,
-    input [F_length_width-1:0]                              F_length_in, 
-    input [F_width_block_num_width-1:0]                     F_width_block_num_in,
-    input [W_width_block_num_width-1:0]                     W_width_block_num_in, 
+    input [P_SHIFT_WIDTH-1:0]                                 i_cfg_shift,
+    input [P_ROW_COUNT_WIDTH-1:0]                              i_cfg_row_count, 
+    input [P_K_BLOCK_COUNT_WIDTH-1:0]                     i_cfg_k_block_count,
+    input [P_N_BLOCK_COUNT_WIDTH-1:0]                     i_cfg_n_block_count, 
 
 
-    input                                                   in_F_valid,
-    input                                                   in_F_last,
-    output                                                  in_F_ready,
-    input [A_size * data_width - 1:0]                       in_F_data,
+    input                                                   i_feature_valid,
+    input                                                   i_feature_last,
+    output                                                  o_feature_ready,
+    input [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]                       i_feature_data,
 
-    input                                                   in_W_valid,
-    input                                                   in_W_last,
-    output                                                  in_W_ready,
-    input [A_size * data_width - 1:0]                       in_W_data,
+    input                                                   i_weight_valid,
+    input                                                   i_weight_last,
+    output                                                  o_weight_ready,
+    input [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]                       i_weight_data,
 
-    output                                                  out_data_valid,
-    input                                                   out_data_ready,
-    output                                                  out_data_last,
-    output [A_size * data_width -1:0]                       out_data
+    output                                                  o_result_valid,
+    input                                                   i_result_ready,
+    output                                                  o_result_last,
+    output [P_ARRAY_SIZE * P_DATA_WIDTH -1:0]                       o_result_data
 
 );
-function integer clogb2 (input integer bit_depth);              
-begin:log
-    automatic integer temp;
-    temp = 0;                                                        
-    for(clogb2=0; bit_depth>0; clogb2=clogb2+1)begin
-        if(bit_depth[0] & bit_depth!=1)
-            temp = 1;                   
-        bit_depth = bit_depth >> 1;
+localparam integer LP_LOG2_ARRAY_M = (P_ARRAY_SIZE <= 1) ? 1 : $clog2(P_ARRAY_SIZE);
+
+reg [P_SHIFT_WIDTH-1:0]                                 r_cfg_shift;
+reg [P_ROW_COUNT_WIDTH-1:0]                              r_cfg_row_count; 
+reg [P_K_BLOCK_COUNT_WIDTH-1:0]                     r_cfg_k_block_count;
+reg [P_N_BLOCK_COUNT_WIDTH-1:0]                     r_cfg_n_block_count; 
+reg                                                        r_core_active;
+
+wire [P_ARRAY_SIZE*(LP_LOG2_ARRAY_M+P_DATA_WIDTH*2)-1:0]            w_compute_partial_data;
+wire                                                        w_compute_partial_valid;
+wire                                                        w_compute_partial_last;
+
+wire                                                        w_buffer_feature_valid;
+wire                                                        w_buffer_feature_last;
+wire                                                        w_buffer_feature_ready;
+wire [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]                            w_buffer_feature_data;
+
+wire                                                        w_buffer_weight_valid;
+wire                                                        w_buffer_weight_last;
+wire                                                        w_buffer_weight_ready;
+wire [P_ARRAY_SIZE * P_DATA_WIDTH - 1:0]                            w_buffer_weight_data;
+
+wire                                                        w_input_accept;
+wire                                                        w_final_output_accept;
+wire                                                        w_core_active_for_config;
+
+assign w_input_accept = (i_feature_valid & o_feature_ready) | (i_weight_valid & o_weight_ready);
+assign w_final_output_accept = o_result_valid & i_result_ready & o_result_last;
+assign w_core_active_for_config = r_core_active
+                                | w_input_accept
+                                | w_buffer_feature_valid
+                                | w_buffer_weight_valid
+                                | w_compute_partial_valid
+                                | o_result_valid;
+
+always @(posedge i_clk or negedge i_rst_n) begin
+    if(~i_rst_n)
+        r_core_active <= 0;
+    else if(w_final_output_accept)
+        r_core_active <= 0;
+    else if(w_input_accept | w_buffer_feature_valid | w_buffer_weight_valid |
+            w_compute_partial_valid | o_result_valid)
+        r_core_active <= 1;
+    else
+        r_core_active <= r_core_active;
+end
+
+always @(posedge i_clk or negedge i_rst_n) begin
+    if(~i_rst_n) begin
+        r_cfg_shift <= 0;
+        r_cfg_row_count <= 0;
+        r_cfg_k_block_count <= 0;
+        r_cfg_n_block_count <= 0;
     end
-    clogb2 = clogb2 + temp - 1;                                   
-end                                                   
-endfunction
-localparam integer log2_array_m = clogb2(A_size);
-
-reg [shift_width-1:0]                                 shift;
-reg [F_length_width-1:0]                              F_length; 
-reg [F_width_block_num_width-1:0]                     F_width_block_num;
-reg [W_width_block_num_width-1:0]                     W_width_block_num; 
-reg [shift_width-1:0]                                 shift_in_delay1;
-reg [F_length_width-1:0]                              F_length_in_delay1; 
-reg [F_width_block_num_width-1:0]                     F_width_block_num_in_delay1;
-reg [W_width_block_num_width-1:0]                     W_width_block_num_in_delay1; 
-
-initial begin
-    shift = {(shift_width){1'b1}};
-    F_length = {(F_length_width){1'b1}};
-    F_width_block_num = {(F_width_block_num_width){1'b1}};
-    W_width_block_num = {(W_width_block_num_width){1'b1}};
+    else if(~w_core_active_for_config) begin
+        r_cfg_shift <= i_cfg_shift;
+        r_cfg_row_count <= i_cfg_row_count;
+        r_cfg_k_block_count <= i_cfg_k_block_count;
+        r_cfg_n_block_count <= i_cfg_n_block_count;
+    end
+    else begin
+        r_cfg_shift <= r_cfg_shift;
+        r_cfg_row_count <= r_cfg_row_count;
+        r_cfg_k_block_count <= r_cfg_k_block_count;
+        r_cfg_n_block_count <= r_cfg_n_block_count;
+    end
 end
 
-always @(posedge clk ) begin
-    if(shift_in_delay1 != shift_in)
-        shift <= shift_in;
-end
-
-always @(posedge clk ) begin
-    if(F_length_in_delay1 != F_length_in)
-        F_length <=F_length_in;
-end
-
-always @(posedge clk ) begin
-    if(F_width_block_num_in_delay1 != F_width_block_num_in)
-        F_width_block_num <= F_width_block_num_in;
-end
-
-always @(posedge clk ) begin
-    if(W_width_block_num_in_delay1 != W_width_block_num_in)
-        W_width_block_num <= W_width_block_num_in;
-end
-
-always @(posedge clk ) begin
-    shift_in_delay1 <= shift_in;
-    F_length_in_delay1 <= F_length_in;
-    F_width_block_num_in_delay1 <= F_width_block_num_in;
-    W_width_block_num_in_delay1 <= W_width_block_num_in;
-end
-
-
-wire [A_size*(log2_array_m+data_width*2)-1:0]               MM_buffer_out_data;
-wire                                                        MM_buffer_out_valid;
-wire                                                        MM_buffer_out_last;
-
-wire                                                        in_MM_buffer_F_valid;
-wire                                                        in_MM_buffer_F_last;
-wire                                                        in_MM_buffer_F_ready;
-wire [A_size * data_width - 1:0]                            in_MM_buffer_F_data;
-
-wire                                                        in_MM_buffer_W_valid;
-wire                                                        in_MM_buffer_W_last;
-wire                                                        in_MM_buffer_W_ready;
-wire [A_size * data_width - 1:0]                            in_MM_buffer_W_data;
-
-
-
-
-In_buffer
+InputBuffer
 #(
-    .A_size(A_size),
-    .data_width(data_width),
-    .Weight_Block_num(Weight_Block_num), 
-    .IN_Feature_Block_num(IN_Feature_Block_num),
-    .F_length_width(F_length_width),
-    .F_width_block_num_width(F_width_block_num_width),
-    .W_width_block_num_width(W_width_block_num_width)
-)u_in_buffer(
-    .clk(clk),
-    .rst_n(rst_n),
+    .P_ARRAY_SIZE(P_ARRAY_SIZE),
+    .P_DATA_WIDTH(P_DATA_WIDTH),
+    .P_WEIGHT_BUFFER_DEPTH(P_WEIGHT_BUFFER_DEPTH), 
+    .P_FEATURE_BUFFER_DEPTH(P_FEATURE_BUFFER_DEPTH),
+    .P_ROW_COUNT_WIDTH(P_ROW_COUNT_WIDTH),
+    .P_K_BLOCK_COUNT_WIDTH(P_K_BLOCK_COUNT_WIDTH),
+    .P_N_BLOCK_COUNT_WIDTH(P_N_BLOCK_COUNT_WIDTH)
+)u_input_buffer(
+    .i_clk(i_clk),
+    .i_rst_n(i_rst_n),
     
-    .W_width_block_num(W_width_block_num), //1 ~ block_num
-    .F_width_block_num(F_width_block_num), //1 ~ block_num
-    .F_length(F_length),                   //1 ~ block_num *A_size
+    .i_cfg_n_block_count(r_cfg_n_block_count), //1 ~ block_num
+    .i_cfg_k_block_count(r_cfg_k_block_count), //1 ~ block_num
+    .i_cfg_row_count(r_cfg_row_count),                   //1 ~ block_num *P_ARRAY_SIZE
 
-    .MM_buffer_out_last(MM_buffer_out_last),
+    .i_compute_partial_last(w_compute_partial_last),
 
-    .in_F_valid(in_F_valid),
-    .in_F_last(in_F_last),
-    .in_F_ready(in_F_ready),
-    .in_F_data(in_F_data),
+    .i_feature_valid(i_feature_valid),
+    .i_feature_last(i_feature_last),
+    .o_feature_ready(o_feature_ready),
+    .i_feature_data(i_feature_data),
 
-    .in_W_valid(in_W_valid),
-    .in_W_last(in_W_last),
-    .in_W_ready(in_W_ready),
-    .in_W_data(in_W_data),
+    .i_weight_valid(i_weight_valid),
+    .i_weight_last(i_weight_last),
+    .o_weight_ready(o_weight_ready),
+    .i_weight_data(i_weight_data),
 
-    .in_MM_buffer_F_valid(in_MM_buffer_F_valid),
-    .in_MM_buffer_F_last(in_MM_buffer_F_last),
-    .in_MM_buffer_F_ready(in_MM_buffer_F_ready),
-    .in_MM_buffer_F_data(in_MM_buffer_F_data),
+    .o_buffer_feature_valid(w_buffer_feature_valid),
+    .o_buffer_feature_last(w_buffer_feature_last),
+    .i_buffer_feature_ready(w_buffer_feature_ready),
+    .o_buffer_feature_data(w_buffer_feature_data),
 
-    .in_MM_buffer_W_valid(in_MM_buffer_W_valid),
-    .in_MM_buffer_W_last(in_MM_buffer_W_last),
-    .in_MM_buffer_W_ready(in_MM_buffer_W_ready),
-    .in_MM_buffer_W_data(in_MM_buffer_W_data)
+    .o_buffer_weight_valid(w_buffer_weight_valid),
+    .o_buffer_weight_last(w_buffer_weight_last),
+    .i_buffer_weight_ready(w_buffer_weight_ready),
+    .o_buffer_weight_data(w_buffer_weight_data)
 
 );
 
 
-Buffer_feeder
+BufferFeeder
 #(
-    .array_m(A_size),
-    .array_n(A_size),
-    .data_width(data_width),
-    .log2_array_m(log2_array_m),
-    .F_length_width(F_length_width),
-    .W_width_block_num_width(W_width_block_num_width)
+    .P_ARRAY_ROWS(P_ARRAY_SIZE),
+    .P_ARRAY_COLS(P_ARRAY_SIZE),
+    .P_DATA_WIDTH(P_DATA_WIDTH),
+    .P_ROW_INDEX_WIDTH(LP_LOG2_ARRAY_M),
+    .P_ROW_COUNT_WIDTH(P_ROW_COUNT_WIDTH),
+    .P_N_BLOCK_COUNT_WIDTH(P_N_BLOCK_COUNT_WIDTH)
 )u_buffer_feeder(
-    .clk(clk),
-    .rst_n(rst_n),
+    .i_clk(i_clk),
+    .i_rst_n(i_rst_n),
 
-    // .shift(shift),
-    .FL(F_length), //feature length
-    .num_blobk_W(W_width_block_num),
+    .i_cfg_row_count(r_cfg_row_count), //feature length
+    .i_cfg_n_block_count(r_cfg_n_block_count),
 
-    .MM_buffer_inWeight_data(in_MM_buffer_W_data),
-    .MM_buffer_inWeight_valid(in_MM_buffer_W_valid),
-    .MM_buffer_inWeight_ready(in_MM_buffer_W_ready),
-    .MM_buffer_inWeight_last(in_MM_buffer_W_last),
+    .i_buffer_weight_data(w_buffer_weight_data),
+    .i_buffer_weight_valid(w_buffer_weight_valid),
+    .o_buffer_weight_ready(w_buffer_weight_ready),
+    .i_buffer_weight_last(w_buffer_weight_last),
 
-    .MM_buffer_inFeature_data(in_MM_buffer_F_data),
-    .MM_buffer_inFeature_valid(in_MM_buffer_F_valid),
-    .MM_buffer_inFeature_ready(in_MM_buffer_F_ready),
-    .MM_buffer_inFeature_last(in_MM_buffer_F_last),
+    .i_buffer_feature_data(w_buffer_feature_data),
+    .i_buffer_feature_valid(w_buffer_feature_valid),
+    .o_buffer_feature_ready(w_buffer_feature_ready),
+    .i_buffer_feature_last(w_buffer_feature_last),
 
-    .MM_buffer_out_data(MM_buffer_out_data),
-    .MM_buffer_out_valid(MM_buffer_out_valid),
-    .MM_buffer_out_last(MM_buffer_out_last)
+    .o_compute_partial_data(w_compute_partial_data),
+    .o_compute_partial_valid(w_compute_partial_valid),
+    .o_compute_partial_last(w_compute_partial_last)
 );
 
 
-Out_buffer
+OutputBuffer
 #(
-    .data_width(data_width),
-    .OUT_Feature_Block_num(OUT_Feature_Block_num),
-    .A_size(A_size),
-    .shift_width(shift_width),
-    .log2_array_m(log2_array_m),
-    .OUT_MEM_WIDTH(OUT_MEM_WIDTH),
-    .F_length_width(F_length_width),
-    .F_width_block_num_width(F_width_block_num_width),
-    .W_width_block_num_width(W_width_block_num_width)
-)u_out_buffer(
-    .clk(clk),
-    .rst_n(rst_n),
+    .P_DATA_WIDTH(P_DATA_WIDTH),
+    .P_OUTPUT_BUFFER_DEPTH(P_OUTPUT_BUFFER_DEPTH),
+    .P_ARRAY_SIZE(P_ARRAY_SIZE),
+    .P_SHIFT_WIDTH(P_SHIFT_WIDTH),
+    .P_ROW_INDEX_WIDTH(LP_LOG2_ARRAY_M),
+    .P_ACCUM_WIDTH(P_ACCUM_WIDTH),
+    .P_ROW_COUNT_WIDTH(P_ROW_COUNT_WIDTH),
+    .P_K_BLOCK_COUNT_WIDTH(P_K_BLOCK_COUNT_WIDTH),
+    .P_N_BLOCK_COUNT_WIDTH(P_N_BLOCK_COUNT_WIDTH)
+)u_output_buffer(
+    .i_clk(i_clk),
+    .i_rst_n(i_rst_n),
 
-    .shift(shift),
-    .F_length(F_length), //1 ~ block_num *A_size
-    .F_width_block_num(F_width_block_num), //1 ~ block_num
-    .W_width_block_num(W_width_block_num), //1 ~ block_num
+    .i_cfg_shift(r_cfg_shift),
+    .i_cfg_row_count(r_cfg_row_count), //1 ~ block_num *P_ARRAY_SIZE
+    .i_cfg_k_block_count(r_cfg_k_block_count), //1 ~ block_num
+    .i_cfg_n_block_count(r_cfg_n_block_count), //1 ~ block_num
     
-    .in_data_valid(MM_buffer_out_valid),
-    .in_data_last(MM_buffer_out_last),
-    .in_data(MM_buffer_out_data),
+    .i_partial_valid(w_compute_partial_valid),
+    .i_partial_last(w_compute_partial_last),
+    .i_partial_data(w_compute_partial_data),
 
-    .out_data_valid(out_data_valid),
-    .out_data_ready(out_data_ready),
-    .out_data_last(out_data_last),
-    .out_data(out_data)
+    .o_result_valid(o_result_valid),
+    .i_result_ready(i_result_ready),
+    .o_result_last(o_result_last),
+    .o_result_data(o_result_data)
 );
 endmodule
