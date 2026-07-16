@@ -1,6 +1,6 @@
 `timescale 1ns / 1ns
 
-module tb_GEMM_top_axi_two_job_64x64_verify;
+module tb_GEMM_top_axi_two_job_64x64_verify_copy_matrix;
 
 localparam integer P_AXI_LITE_DATA_WIDTH = 32;
 localparam integer P_AXI_LITE_ADDR_WIDTH = 4;
@@ -646,6 +646,30 @@ begin
 end
 endtask
 
+task automatic print_result_matrix(input integer job_id);
+    integer row;
+    integer col;
+begin
+    // Copy the complete block from MATRIX_BEGIN to MATRIX_END into
+    // result_matrix.txt. Each matrix row contains exactly N integers.
+    $display("");
+    $display("MATRIX_BEGIN JOB=%0d ROWS=%0d COLS=%0d", job_id + 1, M, N);
+
+    for (row = 0; row < M; row = row + 1) begin
+        for (col = 0; col < N; col = col + 1) begin
+            if (col == 0)
+                $write("%0d", actual_q[job_id][row][col]);
+            else
+                $write(" %0d", actual_q[job_id][row][col]);
+        end
+        $display("");
+    end
+
+    $display("MATRIX_END JOB=%0d", job_id + 1);
+    $display("");
+end
+endtask
+
 task automatic print_job_summary(input integer job_id);
 begin
     job_tlast_pass[job_id] = (job_first_last_error_index[job_id] < 0) &&
@@ -740,6 +764,7 @@ begin
     main_stream_active <= 1'b0;
     force_result_ready_high <= 1'b0;
     repeat (10) @(posedge clk);
+    print_result_matrix(job_id);
     print_job_summary(job_id);
     $display("JOB_%0d_END cycle=%0d", job_id + 1, cycle);
     current_job = -1;
