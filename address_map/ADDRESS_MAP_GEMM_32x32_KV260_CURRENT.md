@@ -43,27 +43,6 @@ COMPARE PASS
 
 ## 2. High-Level Data Path
 
-The design uses three AXI DMA IP blocks and one custom GEMM IP.
-
-```text
-DDR memory
-   |
-   | AXI MM2S
-   v
-axi_dma_0  -------------------->  GEMM_DSP_IP_0/feature_axis
-                                  |
-DDR memory                        |
-   |                              |
-   | AXI MM2S                     |
-   v                              v
-axi_dma_1  -------------------->  GEMM_DSP_IP_0/weight_axis
-
-GEMM_DSP_IP_0/result_axis ----->  axi_dma_2
-                                      |
-                                      | AXI S2MM
-                                      v
-                                  DDR memory
-```
 
 Control is done through AXI-Lite:
 
