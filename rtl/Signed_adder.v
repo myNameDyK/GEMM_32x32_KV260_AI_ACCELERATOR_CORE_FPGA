@@ -9,7 +9,7 @@ module SignedAdder
     input  [P_ARRAY_SIZE * P_DATA_WIDTH - 1 : 0] i_addend_b,
     output reg [P_ARRAY_SIZE * P_DATA_WIDTH - 1 : 0] o_sum_sat
 );
-wire [(P_DATA_WIDTH + 1)-1:0] w_lane_sum_ext [P_ARRAY_SIZE-1:0]; // Double sign bit detects positive/negative overflow.
+wire [(P_DATA_WIDTH + 1)-1:0] w_lane_sum_ext [P_ARRAY_SIZE-1:0];
 wire [P_DATA_WIDTH - 1:0] w_sum_lane_display [P_ARRAY_SIZE-1:0];
 genvar i;
 
