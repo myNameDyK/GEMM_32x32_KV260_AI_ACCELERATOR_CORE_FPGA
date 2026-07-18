@@ -236,7 +236,7 @@ end
 always @(posedge i_clk or negedge i_rst_n) begin
     if(~i_rst_n)
         state <= `IDLE;
-    else if (state == `IDLE) begin //only start can wake up state
+    else if (state == `IDLE) begin 
         if (start)
             state <= `SET_WEIGHT;
         else
@@ -350,9 +350,9 @@ end
 
 GemmComputeCore
 #(
-    .P_ARRAY_ROWS(P_ARRAY_ROWS), //Array 行数
-    .P_ARRAY_COLS(P_ARRAY_COLS), //Array 列数
-    .P_DATA_WIDTH(P_DATA_WIDTH), //数据宽度
+    .P_ARRAY_ROWS(P_ARRAY_ROWS), 
+    .P_ARRAY_COLS(P_ARRAY_COLS), 
+    .P_DATA_WIDTH(P_DATA_WIDTH), 
     .P_ROW_INDEX_WIDTH(P_ROW_INDEX_WIDTH)
 ) u_compute_core
 (
