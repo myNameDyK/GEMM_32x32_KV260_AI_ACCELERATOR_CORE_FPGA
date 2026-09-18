@@ -1,0 +1,79 @@
+Sparse attention reduces computation by retaining only the most important
+connections between query and key tokens. A block-pruning method divides the
+post-softmax attention matrix into small rectangular regions. Each region is
+examined using the sum of the attention probabilities in its rows. Blocks with
+little probability mass can be removed, while important blocks near the
+diagonal, the first tokens, and semantically related positions are retained.
+
+Hardware accelerators based on systolic arrays are efficient for regular dense
+matrix multiplication. Sparse matrices, however, create irregular memory
+accesses and poor processing-element utilization. Block aggregation restores a
+regular execution order by merging column indices and inserting zero bubbles
+where an attention row does not contain a retained block. The resulting data
+stream can reuse a static GEMM datapath, although bubbles and index processing
+still introduce overhead.
+
+This experiment visualizes attention before and after block pruning. It uses a
+sequence length of 1024 tokens and a three-by-twenty pruning block. The images
+help reveal diagonal patterns, attention sinks in early columns, clusters, and
+the block-shaped regions removed by pruning. The goal is analysis rather than
+text generation, training, or hardware-performance measurement.Sparse attention reduces computation by retaining only the most important
+connections between query and key tokens. A block-pruning method divides the
+post-softmax attention matrix into small rectangular regions. Each region is
+examined using the sum of the attention probabilities in its rows. Blocks with
+little probability mass can be removed, while important blocks near the
+diagonal, the first tokens, and semantically related positions are retained.
+
+Hardware accelerators based on systolic arrays are efficient for regular dense
+matrix multiplication. Sparse matrices, however, create irregular memory
+accesses and poor processing-element utilization. Block aggregation restores a
+regular execution order by merging column indices and inserting zero bubbles
+where an attention row does not contain a retained block. The resulting data
+stream can reuse a static GEMM datapath, although bubbles and index processing
+still introduce overhead.
+
+This experiment visualizes attention before and after block pruning. It uses a
+sequence length of 1024 tokens and a three-by-twenty pruning block. The images
+help reveal diagonal patterns, attention sinks in early columns, clusters, and
+the block-shaped regions removed by pruning. The goal is analysis rather than
+text generation, training, or hardware-performance measurement.Sparse attention reduces computation by retaining only the most important
+connections between query and key tokens. A block-pruning method divides the
+post-softmax attention matrix into small rectangular regions. Each region is
+examined using the sum of the attention probabilities in its rows. Blocks with
+little probability mass can be removed, while important blocks near the
+diagonal, the first tokens, and semantically related positions are retained.
+
+Hardware accelerators based on systolic arrays are efficient for regular dense
+matrix multiplication. Sparse matrices, however, create irregular memory
+accesses and poor processing-element utilization. Block aggregation restores a
+regular execution order by merging column indices and inserting zero bubbles
+where an attention row does not contain a retained block. The resulting data
+stream can reuse a static GEMM datapath, although bubbles and index processing
+still introduce overhead.
+
+This experiment visualizes attention before and after block pruning. It uses a
+sequence length of 1024 tokens and a three-by-twenty pruning block. The images
+help reveal diagonal patterns, attention sinks in early columns, clusters, and
+the block-shaped regions removed by pruning. The goal is analysis rather than
+text generation, training, or hardware-performance measurement.Sparse attention reduces computation by retaining only the most important
+connections between query and key tokens. A block-pruning method divides the
+post-softmax attention matrix into small rectangular regions. Each region is
+examined using the sum of the attention probabilities in its rows. Blocks with
+little probability mass can be removed, while important blocks near the
+diagonal, the first tokens, and semantically related positions are retained.
+
+Hardware accelerators based on systolic arrays are efficient for regular dense
+matrix multiplication. Sparse matrices, however, create irregular memory
+accesses and poor processing-element utilization. Block aggregation restores a
+regular execution order by merging column indices and inserting zero bubbles
+where an attention row does not contain a retained block. The resulting data
+stream can reuse a static GEMM datapath, although bubbles and index processing
+still introduce overhead.
+
+This experiment visualizes attention before and after block pruning. It uses a
+sequence length of 1024 tokens and a three-by-twenty pruning block. The images
+help reveal diagonal patterns, attention sinks in early columns, clusters, and
+the block-shaped regions removed by pruning. The goal is analysis rather than
+text generation, training, or hardware-performance measurement.Sparse attention reduces computation by retaining only the most important
+connections between query and key tokens. A block-pruning method divides the
+post-softmax attention matrix into small rectangular regions.

@@ -1,0 +1,21 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "n": 1024,
+  "alpha": 20.0,
+  "threshold_alpha_over_n": 0.01953125,
+  "block_rows": 3,
+  "block_cols": 20,
+  "device": "cuda",
+  "dtype": "torch.float16",
+  "num_layers": 24,
+  "num_attention_heads": 14,
+  "selected_layers": [
+    0,
+    12,
+    23
+  ],
+  "selected_individual_heads": [
+    0
+  ],
+  "note": "Pruning is applied to post-softmax attention without renormalization."
+}
